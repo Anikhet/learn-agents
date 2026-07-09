@@ -1,11 +1,4 @@
 # Agentic Design Patterns Tutorial Notebooks
-
-This workspace contains an original, hands-on notebook curriculum that follows the book's topic sequence without reproducing the book text.
-
-Start with `notebooks/00_course_orientation.ipynb`, then work through the numbered notebooks in order.
-
-See `COVERAGE_REVIEW.md` for the topic-by-topic coverage audit.
-
 ## Notebook Map
 
 - `00_course_orientation.ipynb` - Course Orientation
