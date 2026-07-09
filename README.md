@@ -1,0 +1,39 @@
+# Agentic Design Patterns Tutorial Notebooks
+
+This workspace contains an original, hands-on notebook curriculum that follows the book's topic sequence without reproducing the book text.
+
+Start with `notebooks/00_course_orientation.ipynb`, then work through the numbered notebooks in order.
+
+See `COVERAGE_REVIEW.md` for the topic-by-topic coverage audit.
+
+## Notebook Map
+
+- `00_course_orientation.ipynb` - Course Orientation
+- `01_prompt_chaining.ipynb` - Prompt Chaining
+- `02_routing.ipynb` - Routing
+- `03_parallelization.ipynb` - Parallelization
+- `04_reflection.ipynb` - Reflection
+- `05_tool_use_function_calling.ipynb` - Tool Use Function Calling
+- `06_planning.ipynb` - Planning
+- `07_multi_agent_collaboration.ipynb` - Multi-Agent Collaboration
+- `08_memory_management.ipynb` - Memory Management
+- `09_learning_and_adaptation.ipynb` - Learning and Adaptation
+- `10_model_context_protocol_mcp.ipynb` - Model Context Protocol MCP
+- `11_goal_setting_and_monitoring.ipynb` - Goal Setting and Monitoring
+- `12_exception_handling_and_recovery.ipynb` - Exception Handling and Recovery
+- `13_human_in_the_loop.ipynb` - Human in the Loop
+- `14_knowledge_retrieval_rag.ipynb` - Knowledge Retrieval RAG
+- `15_inter_agent_communication_a2a.ipynb` - Inter-Agent Communication A2A
+- `16_resource_aware_optimization.ipynb` - Resource-Aware Optimization
+- `17_reasoning_techniques.ipynb` - Reasoning Techniques
+- `18_guardrails_safety_patterns.ipynb` - Guardrails Safety Patterns
+- `19_evaluation_and_monitoring.ipynb` - Evaluation and Monitoring
+- `20_prioritization.ipynb` - Prioritization
+- `21_exploration_and_discovery.ipynb` - Exploration and Discovery
+- `A_appendix_a_advanced_prompting.ipynb` - Appendix A Advanced Prompting
+- `B_appendix_b_agentic_interactions.ipynb` - Appendix B Agentic Interactions
+- `C_appendix_c_quick_reference.ipynb` - Appendix C Quick Reference
+- `D_appendix_d_building_an_agent.ipynb` - Appendix D Building an Agent
+- `E_appendix_e_ai_agents_on_the_cli.ipynb` - Appendix E AI Agents on the CLI
+- `F_appendix_f_under_the_hood.ipynb` - Appendix F Under the Hood
+- `G_appendix_g_coding_agents.ipynb` - Appendix G Coding Agents
