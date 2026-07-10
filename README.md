@@ -23,6 +23,15 @@
 - `19_evaluation_and_monitoring.ipynb` - Evaluation and Monitoring
 - `20_prioritization.ipynb` - Prioritization
 - `21_exploration_and_discovery.ipynb` - Exploration and Discovery
+- `22_evaluation_reliability_deep_dive.ipynb` - Evaluation and Reliability Deep Dive (2026 SOTA)
+- `23_voice_ai_fundamentals.ipynb` - Voice AI Fundamentals (STT/TTS, VAD, turn-taking, LiveKit/Pipecat, telephony)
+- `24_structured_output_model_agnostic.ipynb` - Structured Output and Model-Agnostic Architecture
+- `25_embeddings_clustering_themes.ipynb` - Embeddings, Clustering, and Theme Extraction
+- `26_mapreduce_summarization_confidence.ipynb` - Map-Reduce Summarization and Confidence Signaling
+- `27_systems_design_voice_platform.ipynb` - Systems Design: Voice Interview Platform at Scale
+- `28_production_agent_harness.ipynb` - Production Agent Harness (P/G/E loops, typed state graphs, MCP decoupling, parallel subagents)
+- `29_advanced_production_rag.ipynb` - Advanced Production RAG (hybrid, RRF, reranking, HyDE, GraphRAG, online evals)
+- `30_finetuning_routing_prompt_optimization.ipynb` - Fine-Tuning, Model Routing, and Prompt Optimization
 - `A_appendix_a_advanced_prompting.ipynb` - Appendix A Advanced Prompting
 - `B_appendix_b_agentic_interactions.ipynb` - Appendix B Agentic Interactions
 - `C_appendix_c_quick_reference.ipynb` - Appendix C Quick Reference
