@@ -25,43 +25,4 @@ The dependency ranges are based on the releases verified on July 11, 2026:
 LangChain 1.3.13, LangGraph 1.2.9, LangSmith 0.10.2, and Deep Agents 0.5.9.
 See [the folder-based curriculum](notebooks/README.md) for the current map.
 
-## Notebook Map
 
-- `00_course_orientation.ipynb` - Course Orientation
-- `01_prompt_chaining.ipynb` - Prompt Chaining
-- `02_routing.ipynb` - Routing
-- `03_parallelization.ipynb` - Parallelization
-- `04_reflection.ipynb` - Reflection
-- `05_tool_use_function_calling.ipynb` - Tool Use Function Calling
-- `06_planning.ipynb` - Planning
-- `07_multi_agent_collaboration.ipynb` - Multi-Agent Collaboration
-- `08_memory_management.ipynb` - Memory Management
-- `09_learning_and_adaptation.ipynb` - Learning and Adaptation
-- `10_model_context_protocol_mcp.ipynb` - Model Context Protocol MCP
-- `11_goal_setting_and_monitoring.ipynb` - Goal Setting and Monitoring
-- `12_exception_handling_and_recovery.ipynb` - Exception Handling and Recovery
-- `13_human_in_the_loop.ipynb` - Human in the Loop
-- `14_knowledge_retrieval_rag.ipynb` - Knowledge Retrieval RAG
-- `15_inter_agent_communication_a2a.ipynb` - Inter-Agent Communication A2A
-- `16_resource_aware_optimization.ipynb` - Resource-Aware Optimization
-- `17_reasoning_techniques.ipynb` - Reasoning Techniques
-- `18_guardrails_safety_patterns.ipynb` - Guardrails Safety Patterns
-- `19_evaluation_and_monitoring.ipynb` - Evaluation and Monitoring
-- `20_prioritization.ipynb` - Prioritization
-- `21_exploration_and_discovery.ipynb` - Exploration and Discovery
-- `22_evaluation_reliability_deep_dive.ipynb` - Evaluation and Reliability Deep Dive (2026 SOTA)
-- `23_voice_ai_fundamentals.ipynb` - Voice AI Fundamentals (STT/TTS, VAD, turn-taking, LiveKit/Pipecat, telephony)
-- `24_structured_output_model_agnostic.ipynb` - Structured Output and Model-Agnostic Architecture
-- `25_embeddings_clustering_themes.ipynb` - Embeddings, Clustering, and Theme Extraction
-- `26_mapreduce_summarization_confidence.ipynb` - Map-Reduce Summarization and Confidence Signaling
-- `27_systems_design_voice_platform.ipynb` - Systems Design: Voice Interview Platform at Scale
-- `28_production_agent_harness.ipynb` - Production Agent Harness (P/G/E loops, typed state graphs, MCP decoupling, parallel subagents)
-- `29_advanced_production_rag.ipynb` - Advanced Production RAG (hybrid, RRF, reranking, HyDE, GraphRAG, online evals)
-- `30_finetuning_routing_prompt_optimization.ipynb` - Fine-Tuning, Model Routing, and Prompt Optimization
-- `A_appendix_a_advanced_prompting.ipynb` - Appendix A Advanced Prompting
-- `B_appendix_b_agentic_interactions.ipynb` - Appendix B Agentic Interactions
-- `C_appendix_c_quick_reference.ipynb` - Appendix C Quick Reference
-- `D_appendix_d_building_an_agent.ipynb` - Appendix D Building an Agent
-- `E_appendix_e_ai_agents_on_the_cli.ipynb` - Appendix E AI Agents on the CLI
-- `F_appendix_f_under_the_hood.ipynb` - Appendix F Under the Hood
-- `G_appendix_g_coding_agents.ipynb` - Appendix G Coding Agents
