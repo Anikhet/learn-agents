@@ -1,0 +1,492 @@
+# 27. Systems Design: a Voice Support Platform
+
+*Track D (infra + interviews). Book: course addition with no book chapter; it composes Chapter 13 (Human in the Loop), Chapter 16 (Resource-Aware Optimization), and Chapter 19 (Evaluation and Monitoring). Prerequisites: 23. Voice AI Fundamentals, 36. Durable Agent Orchestration, 38. LLM Serving Infrastructure.*
+
+This lesson is a system design interview, worked the way you should work it at the whiteboard. The prompt is one sentence. The answer is forty minutes of requirements, estimates, components, failure modes, and trade-offs. The voice-specific parts (telephony, streaming, turn-taking) sit on top of the ordinary distributed-systems parts (sessions, queues, idempotency, backpressure), and a strong candidate makes the ordinary parts carry most of the weight.
+
+> "Design a voice support platform for a SaaS company. Customers call a phone number, an AI agent answers, looks up their account, fixes billing problems, and escalates to a human when it should."
+
+## The problem
+
+The naive version is the demo everyone builds first:
+
+```text
+phone ──► telephony vendor ──► one Python process
+                                  ├─ WebSocket for audio
+                                  ├─ STT client
+                                  ├─ the agent (in-memory transcript)
+                                  ├─ TTS client
+                                  └─ tools: Stripe, CRM, Notion
+```
+
+It works for one call. It breaks in specific ways at ten thousand:
+
+- The process that holds the audio socket also holds the conversation. Deploy, and every active caller is greeted as a stranger.
+- The Stripe refund tool runs inside the audio loop. A retry after a timeout refunds twice.
+- One provider's TTS quota is 30 concurrent sessions. Nothing tells you this until call 31 hears silence.
+- A caller says "let me speak to a person" and there is no person, no queue, and no transcript to hand over.
+- Cost is unknown until the invoice, because nobody attributes STT minutes, tokens, and TTS characters to a call.
+
+So the design question is really: which pieces of state have which lifetimes, where does each kind of failure land, and how do we keep the per-turn latency budget from lesson 23 while doing all of it.
+
+### Requirements, stated before drawing anything
+
+Functional: inbound calls over the public telephone network and from a web client; identify the caller; answer account and billing questions; execute a small set of consequential actions (refund, plan change, cancel) with policy; escalate to a human with context; record and transcribe for audit and evals.
+
+Non-functional, with numbers, because an interviewer will ask for them:
+
+| Requirement | Target | Why this number |
+|---|---|---|
+| voice-to-voice latency | p50 < 700 ms, p95 < 1,200 ms | human turn gaps; past ~1 s callers say "hello?" |
+| availability of call handling | 99.95% | a phone line that does not answer is an outage, not a degradation |
+| concurrent calls | 2,000 peak, growable to 10,000 | derived below |
+| consequential actions | exactly-once, approved by policy | a duplicate refund is money |
+| escalation | < 30 s to a human with the transcript | the caller has already been patient |
+| cost | known per call, target well under a human minute | the business case |
+| audit | full transcript and every tool call retained | disputes, compliance, evals |
+
+### The shape of the answer
+
+```text
+                 PSTN / SIP                     browser (WebRTC)
+                     │                                 │
+              ┌──────▼────────┐                 ┌──────▼──────┐
+              │ telephony     │                 │ WebRTC SFU  │
+              │ gateway (CPaaS│                 │ / media srv │
+              └──────┬────────┘                 └──────┬──────┘
+                     └──────────────┬──────────────────┘
+                                    ▼  audio frames (20 ms)
+                        ┌───────────────────────┐
+                        │  media workers        │  VAD, endpointing, jitter buffer,
+                        │  (stateless, pooled)  │  STT/TTS streaming adapters
+                        └───────────┬───────────┘
+                                    │  turn events: transcript / interrupt / hangup
+                                    ▼
+                        ┌───────────────────────┐        ┌────────────────────┐
+                        │  conversation service │◄──────►│  session store     │
+                        │  (LangGraph graph per │        │  (checkpointer,    │
+                        │   call thread)        │        │   thread = call id)│
+                        └───┬─────────┬─────────┘        └────────────────────┘
+                            │         │
+              tool calls    │         │  escalate
+                            ▼         ▼
+                   ┌────────────┐  ┌───────────────┐   ┌──────────────┐
+                   │ tool layer │  │ human desk    │   │ LLM gateway  │
+                   │ idempotent │  │ queue + agent │   │ rate limits, │
+                   │ Stripe/CRM │  │ console       │   │ fallback,    │
+                   └────────────┘  └───────────────┘   │ cost meter   │
+                                                       └──────────────┘
+                            │ every event
+                            ▼
+                   ┌────────────────────────────────────────────┐
+                   │ event log -> recordings, transcripts, evals, │
+                   │ cost attribution, dashboards                 │
+                   └────────────────────────────────────────────┘
+```
+
+Three lifetimes are visible in that picture, and separating them is most of the design:
+
+```text
+media session      seconds to minutes   lives in a media worker; can be re-established
+conversation       the whole call       lives in the session store; survives any worker
+business actions   forever              live in Stripe/CRM; must be idempotent and audited
+```
+
+## Build it without a framework
+
+An interviewer will stop you after the diagram and ask for numbers. Do the arithmetic out loud; the code below is the arithmetic.
+
+### Capacity estimates
+
+Start from business inputs, not from infrastructure: calls per day, call length, how peaky the traffic is. Derive concurrency, then derive every downstream quota from concurrency.
+
+```{code-cell} python
+import math
+
+INPUTS = {
+    "calls_per_day": 60_000,
+    "avg_call_minutes": 6.0,
+    "peak_to_average": 3.0,          # support lines peak after billing emails go out
+    "turns_per_minute": 4.0,         # caller + agent exchanges
+    "agent_tokens_per_turn": 120,    # short spoken sentences
+    "prompt_tokens_per_turn": 3_500, # system prompt + tools + rolling transcript (compacted)
+    "tool_calls_per_call": 3,
+    "escalation_rate": 0.12,
+}
+PRICES_PER_MIN = {"stt": 0.006, "tts": 0.030, "telephony": 0.010}
+PRICE_PER_MTOK = {"input": 0.40, "cached_input": 0.10, "output": 1.60}   # a small fast model tier
+
+
+def estimate(i, cache_hit=0.85):
+    avg_concurrent = i["calls_per_day"] * i["avg_call_minutes"] / (24 * 60)
+    peak_concurrent = avg_concurrent * i["peak_to_average"]
+    turns_per_s = peak_concurrent * i["turns_per_minute"] / 60
+    in_tok_s = turns_per_s * i["prompt_tokens_per_turn"]
+    out_tok_s = turns_per_s * i["agent_tokens_per_turn"]
+    # cost of one call
+    minutes = i["avg_call_minutes"]
+    turns = minutes * i["turns_per_minute"]
+    in_tok = turns * i["prompt_tokens_per_turn"]
+    llm = (in_tok * (1 - cache_hit) * PRICE_PER_MTOK["input"]
+           + in_tok * cache_hit * PRICE_PER_MTOK["cached_input"]
+           + turns * i["agent_tokens_per_turn"] * PRICE_PER_MTOK["output"]) / 1e6
+    media = minutes * sum(PRICES_PER_MIN.values())
+    return {
+        "avg_concurrent_calls": round(avg_concurrent),
+        "peak_concurrent_calls": round(peak_concurrent),
+        "stt_streams_needed": math.ceil(peak_concurrent * 1.2),       # 20% headroom
+        "tts_sessions_needed": math.ceil(peak_concurrent * 1.2),
+        "peak_turns_per_s": round(turns_per_s, 1),
+        "peak_input_tok_per_s": round(in_tok_s),
+        "peak_output_tok_per_s": round(out_tok_s),
+        "human_escalations_per_hour_at_peak": round(peak_concurrent * i["escalation_rate"] * 60 / minutes),
+        "cost_per_call_usd": round(llm + media, 3),
+        "llm_share_of_cost": round(llm / (llm + media), 2),
+    }
+
+
+e = estimate(INPUTS)
+for k, v in e.items():
+    print(f"{k:<36} {v}")
+
+assert e["avg_concurrent_calls"] == 250 and e["peak_concurrent_calls"] == 750
+assert e["stt_streams_needed"] == 900                     # the quota to negotiate with the vendor
+assert e["cost_per_call_usd"] < 0.60                      # media dominates; tokens are cheap here
+no_cache = estimate(INPUTS, cache_hit=0.0)
+assert no_cache["cost_per_call_usd"] > e["cost_per_call_usd"]
+print(f"without prompt caching the call costs {no_cache['cost_per_call_usd']:.3f} instead of {e['cost_per_call_usd']:.3f}")
+```
+
+The numbers tell the design what to worry about. Peak concurrency of 750 is the quota you must hold with every streaming vendor, with headroom. Input tokens per second at peak, on the order of a few hundred thousand, is a real serving load if you self-host and a real rate-limit conversation if you do not. The cost is dominated by per-minute media prices, not tokens, which changes where optimization effort goes: shorter calls and fewer escalations save more than a cheaper model. Human escalations at peak, about 90 per hour here, size the human desk.
+
+### Admission control and graceful degradation
+
+Every streaming vendor has a concurrency ceiling. The platform must know its own ceilings and refuse or degrade *before* a caller hears silence. The mechanism is ordinary: per-resource semaphores, a queue with a bounded wait, and a ladder of degradations you choose in advance.
+
+```text
+degradation ladder (cheapest loss first)
+  1. switch TTS to the lower-tier voice          (quality, not function)
+  2. shorten system prompt, drop retrieval        (slightly worse answers)
+  3. disable proactive summaries and small talk   (fewer tokens per turn)
+  4. play "high call volume" and offer callback   (function, but honest)
+  5. hard-refuse with busy signal                  (never: silence)
+```
+
+```{code-cell} python
+import random
+from collections import Counter
+
+random.seed(27)
+
+CEILINGS = {"stt": 900, "tts_premium": 400, "tts_standard": 900, "llm_turns_per_s": 60, "media_workers": 1000}
+
+
+class Admission:
+    """Decides, per incoming call, which tier it gets or whether it is deferred. Never silence."""
+
+    def __init__(self, ceilings):
+        self.ceilings, self.in_use = ceilings, Counter()
+        self.decisions = Counter()
+
+    def admit(self):
+        if self.in_use["media_workers"] >= self.ceilings["media_workers"] or \
+           self.in_use["stt"] >= self.ceilings["stt"]:
+            self.decisions["callback_offered"] += 1               # rung 4: honest, not silent
+            return None
+        tier = "premium" if self.in_use["tts_premium"] < self.ceilings["tts_premium"] else "standard"
+        if self.in_use[f"tts_{tier}"] >= self.ceilings[f"tts_{tier}"]:
+            self.decisions["callback_offered"] += 1
+            return None
+        for r in ("media_workers", "stt", f"tts_{tier}"):
+            self.in_use[r] += 1
+        self.decisions[tier] += 1
+        return tier
+
+    def release(self, tier):
+        for r in ("media_workers", "stt", f"tts_{tier}"):
+            self.in_use[r] -= 1
+
+
+def simulate(peak_arrivals_per_min, minutes=60, avg_call_min=6.0):
+    adm, active = Admission(CEILINGS), []
+    for minute in range(minutes):
+        still = []
+        for tier, end in active:
+            if end > minute:
+                still.append((tier, end))
+            else:
+                adm.release(tier)
+        active = still
+        for _ in range(int(random.gauss(peak_arrivals_per_min, peak_arrivals_per_min * 0.1))):
+            tier = adm.admit()
+            if tier:
+                active.append((tier, minute + max(1, random.expovariate(1 / avg_call_min))))
+    return adm.decisions
+
+
+normal = simulate(peak_arrivals_per_min=125)              # ~750 concurrent at 6 min each
+surge = simulate(peak_arrivals_per_min=220)               # billing-email day
+print("normal:", dict(normal))
+print("surge :", dict(surge))
+assert normal["callback_offered"] == 0 and normal["standard"] > 0      # premium ceiling degrades first
+assert surge["callback_offered"] > 0                                    # then we say so, honestly
+assert "silence" not in surge
+print("degradation happens in the order we chose, and callers are never left in silence")
+```
+
+The important property is not the numbers; it is that the order of degradation was decided by an engineer in advance, and that the last rung is an honest message rather than a timeout.
+
+### Consequential actions
+
+The tool layer wraps Stripe and the CRM with three things the agent must never be trusted to provide itself: an idempotency key derived from the call and the turn, a policy check (amount limits, plan eligibility, caller verification level), and an audit record. The model chooses; the tool layer executes, exactly once.
+
+```text
+agent:       refund(charge_id="ch_2", amount=499.00)
+tool layer:  key = hash(call_id, turn_id, "refund", "ch_2")
+             policy: verified caller? amount <= auto-approve limit? else -> approval
+             Stripe.refund(..., idempotency_key=key)        # retry-safe
+             audit.append(call_id, turn_id, "refund", args, result)
+agent:       "I have refunded the duplicate $499 charge."
+```
+
+## How LangGraph does it
+
+The conversation service is one LangGraph graph per call, with the call id as the thread id. The checkpointer is the session store from the diagram; every node boundary is a durable write, so a media worker can die mid-turn and the next worker resumes the same thread. That is the "conversation outlives the media session" requirement, implemented by the persistence primitive rather than by custom code.
+
+Escalation is `interrupt`. When policy says a human must approve (a refund above the limit) or the caller asks for a person, the graph pauses with the transcript attached, the human desk receives a task, and the human's decision resumes the graph with `Command(resume=...)`. Lesson 13 introduced the primitive; here it becomes a queue between the AI and a human team.
+
+```{code-cell} python
+from typing import Annotated, TypedDict
+from operator import add
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import interrupt, Command
+
+AUTO_APPROVE_LIMIT = 200.00
+audit_log = []                                        # stands in for the append-only event log
+stripe_calls = []                                     # stands in for Stripe; records idempotency keys
+
+
+class CallState(TypedDict):
+    call_id: str
+    transcript: Annotated[list, add]
+    pending_action: dict | None
+    outcome: str
+
+
+def refund_tool(call_id, turn_id, charge_id, amount):
+    key = f"{call_id}:{turn_id}:refund:{charge_id}"
+    if key in stripe_calls:                           # retried after a crash: same key, no second refund
+        return f"already refunded {charge_id} (idempotent replay)"
+    stripe_calls.append(key)
+    audit_log.append({"call_id": call_id, "turn": turn_id, "action": "refund", "amount": amount})
+    return f"refunded {amount:.2f} on {charge_id}"
+
+
+def understand(state: CallState):
+    # In production this is the model turn from lesson 23; scripted here to isolate the flow.
+    return {"transcript": ["agent: I see a duplicate $499 charge. I will request a refund."],
+            "pending_action": {"type": "refund", "charge_id": "ch_2", "amount": 499.00, "turn_id": 3}}
+
+
+def policy_gate(state: CallState):
+    action = state["pending_action"]
+    if action["amount"] <= AUTO_APPROVE_LIMIT:
+        return {"transcript": ["policy: auto-approved"]}
+    # Above the limit: pause the call's graph, hand the transcript to the human desk, wait.
+    decision = interrupt({"call_id": state["call_id"], "action": action,
+                          "transcript": state["transcript"], "sla_seconds": 30})
+    return {"transcript": [f"human: {decision['verdict']} ({decision['by']})"],
+            "pending_action": action if decision["verdict"] == "approve" else None}
+
+
+def execute(state: CallState):
+    action = state["pending_action"]
+    if not action:
+        return {"outcome": "declined", "transcript": ["agent: I could not process that refund; a colleague will follow up."]}
+    result = refund_tool(state["call_id"], action["turn_id"], action["charge_id"], action["amount"])
+    return {"outcome": "refunded", "transcript": [f"tool: {result}", "agent: Done, the duplicate charge is refunded."]}
+
+
+builder = StateGraph(CallState)
+builder.add_node("understand", understand)
+builder.add_node("policy_gate", policy_gate)
+builder.add_node("execute", execute)
+builder.add_edge(START, "understand")
+builder.add_edge("understand", "policy_gate")
+builder.add_edge("policy_gate", "execute")
+builder.add_edge("execute", END)
+graph = builder.compile(checkpointer=InMemorySaver())
+
+config = {"configurable": {"thread_id": "call-9001"}}
+paused = graph.invoke({"call_id": "call-9001", "transcript": ["user: I was charged twice."],
+                       "pending_action": None, "outcome": ""}, config)
+task = paused["__interrupt__"][0].value
+print("human desk received:", task["action"], "with", len(task["transcript"]), "transcript lines")
+assert task["action"]["amount"] == 499.00 and "outcome" not in paused or paused["outcome"] == ""
+assert stripe_calls == []                                          # nothing executed while waiting
+
+# The supervisor approves 20 seconds later, possibly from a different process; the thread resumes.
+done = graph.invoke(Command(resume={"verdict": "approve", "by": "supervisor:dana"}), config)
+print("\n".join(done["transcript"]))
+assert done["outcome"] == "refunded" and len(stripe_calls) == 1
+
+# A crash after execute and a retried resume must not refund twice.
+assert refund_tool("call-9001", 3, "ch_2", 499.00).startswith("already refunded")
+assert len(audit_log) == 1
+print("\nexactly one refund, one audit record, one human decision in the transcript")
+```
+
+Map the primitives back to the design:
+
+| Design component | LangGraph primitive | What it replaces from the from-scratch view |
+|---|---|---|
+| session store, thread per call | checkpointer + `thread_id` | conversation state outliving the media worker |
+| human desk queue | `interrupt` payload, `Command(resume=...)` | a hand-written pending-approvals table and poller |
+| append-only transcript | `Annotated[list, add]` reducer | the `transcript` list in lesson 23's `TurnTaker` |
+| exactly-once actions | your idempotent tool layer | LangGraph does not do this for you; the key is yours |
+
+That last row matters in an interview. Durable execution replays nodes after a crash; it does not make side effects idempotent. The idempotency key is the boundary between "resumed" and "duplicated."
+
+### The eval scorecard
+
+A voice platform is evaluated in layers, and the platform should compute the layers from its own event log. This is where the design closes the loop from 19. Evaluation and Monitoring.
+
+```{code-cell} python
+import statistics
+
+random.seed(1)
+# Synthetic per-call events as the event log would emit them.
+calls = []
+for i in range(500):
+    turns = random.randint(8, 40)
+    v2v = [max(200, random.gauss(650, 180)) for _ in range(turns)]
+    calls.append({
+        "call_id": f"c{i}", "turns": turns, "v2v_ms": v2v,
+        "false_end_of_turn": sum(random.random() < 0.03 for _ in range(turns)),
+        "barge_ins": sum(random.random() < 0.08 for _ in range(turns)),
+        "escalated": random.random() < 0.12,
+        "resolved": random.random() < 0.78,
+        "cost_usd": 0.05 * turns / 4 + random.uniform(0.02, 0.08),
+    })
+
+
+def scorecard(calls):
+    all_v2v = [x for c in calls for x in c["v2v_ms"]]
+    all_turns = sum(c["turns"] for c in calls)
+    return {
+        "v2v_p50_ms": round(statistics.median(all_v2v)),
+        "v2v_p95_ms": round(sorted(all_v2v)[int(0.95 * len(all_v2v)) - 1]),
+        "false_end_of_turn_rate": round(sum(c["false_end_of_turn"] for c in calls) / all_turns, 3),
+        "barge_in_rate": round(sum(c["barge_ins"] for c in calls) / all_turns, 3),
+        "escalation_rate": round(sum(c["escalated"] for c in calls) / len(calls), 3),
+        "resolution_rate": round(sum(c["resolved"] for c in calls) / len(calls), 3),
+        "cost_per_resolved_call": round(sum(c["cost_usd"] for c in calls) / max(1, sum(c["resolved"] for c in calls)), 3),
+    }
+
+
+card = scorecard(calls)
+for k, v in card.items():
+    print(f"{k:<26} {v}")
+assert card["v2v_p50_ms"] < 700 and card["v2v_p95_ms"] < 1200      # the SLOs from the requirements table
+assert card["false_end_of_turn_rate"] < 0.05
+assert card["cost_per_resolved_call"] > statistics.mean(c["cost_usd"] for c in calls)   # unresolved calls still cost
+```
+
+Cost per *resolved* call is the number to report upward. It rises when the agent fails, which aligns the platform metric with the business metric.
+
+## What goes wrong in production
+
+1. **Deploy drops every active conversation.** Symptom: after a rollout, mid-call customers are asked to repeat everything. Cause: conversation state in worker memory. Fix: checkpoint per node into the session store keyed by call id; media workers are stateless and drain on deploy while the conversation thread waits for a new worker.
+
+2. **Duplicate refunds after a timeout.** Symptom: finance reports double refunds clustered around an incident. Cause: the tool was retried after a lost response. Fix: idempotency keys derived from call id and turn id, enforced at the tool layer and at Stripe; never let the model supply the key.
+
+3. **Silence at the quota ceiling.** Symptom: some callers hear nothing while dashboards show green. Cause: a streaming vendor's concurrency cap was hit and the client waited on a connect that never completed. Fix: track in-use counts per resource, admit against ceilings with headroom, degrade in a pre-chosen order, and never let "wait for the vendor" be the default.
+
+4. **Escalation with no context.** Symptom: humans ask the customer to start over; handle time doubles. Cause: the human desk gets a call transfer, not a transcript. Fix: the interrupt payload carries the transcript, the pending action, and the verification level; the console shows it before the audio connects.
+
+5. **Cost blind spots.** Symptom: the invoice is 2x the estimate. Cause: STT minutes, TTS characters, tokens, and telephony are billed by four vendors with no call id in common. Fix: emit a cost event per call per resource from the gateway and adapters; compute cost per resolved call daily; alert on the ratio, not the total.
+
+6. **Regional latency surprises.** Symptom: p95 voice-to-voice is fine in one region and 400 ms worse in another. Cause: audio is anchored to a media server in one region while STT, LLM, and TTS are in another; each hop adds a round trip. Fix: co-locate media workers with the inference gateway region; pin a call to one region for its lifetime; measure per-stage latency per region.
+
+7. **Recordings without consent handling.** Symptom: legal asks for the recording consent flag per call and there is none. Cause: recording was treated as an infrastructure default. Fix: consent state in the call thread, honored by the media worker before any audio is persisted; retention and redaction policies in the event log pipeline.
+
+8. **Evals on transcripts only.** Symptom: the eval suite is green while callers complain the bot interrupts. Cause: text evals cannot see turn-taking. Fix: the layered scorecard: STT accuracy on your audio, false end-of-turn rate, barge-in handling, latency percentiles, then task success.
+
+## What changed by 2026
+
+- **Durable conversation state became the default.** LangGraph checkpointers and the OpenAI Agents SDK's session backends make "the conversation outlives the socket" a configuration choice. The design question moved from "how do we persist" to "what is the thread key and what is the retention policy."
+- **Human-in-the-loop became a first-class primitive rather than a bolt-on.** `interrupt` and `Command(resume=...)` in LangGraph, and the tasks and input-required states in MCP's Tasks extension and A2A's task lifecycle, mean the escalation queue is a protocol concept. A2A's `INPUT_REQUIRED` and `AUTH_REQUIRED` task states map directly onto a human desk.
+- **Speech-to-speech models changed the media path but not the platform.** Current provider docs offer realtime audio models; the session store, tool layer, admission control, and evals are unchanged. Keep a text transcript alongside the audio for audit and evals regardless of model type.
+- **Cost attribution moved into the gateway.** LLM gateways now report tokens and cached tokens per request with caller-supplied tags, which is how per-call attribution is done without post-hoc log joins.
+- **Regulatory pressure on recording and disclosure increased.** Treat consent and AI disclosure as state in the call thread, not as a footer in a privacy policy; the specific rules vary by jurisdiction and change, so the platform should make them configurable per region.
+
+## Interview questions
+
+**Q1. Walk me through the high-level architecture and the three kinds of state.**
+
+Strong: Telephony and WebRTC terminate at a media edge and stream 20 ms audio frames to stateless media workers that run VAD, endpointing, and the STT and TTS adapters. Media workers emit turn events to a conversation service, which runs one durable graph per call with the call id as the thread key and a checkpointer as the session store. Tool calls go through an idempotent tool layer to Stripe and the CRM; escalations pause the graph and enqueue to a human desk with the transcript; all model calls go through an LLM gateway for limits, fallback, and cost. Every event lands in an append-only log that feeds recordings, evals, and cost attribution. The three lifetimes are the media session (seconds, re-establishable), the conversation (the call, durable), and business actions (permanent, idempotent, audited).
+
+Weak: "A service that connects Twilio to an LLM."
+
+**Q2. Estimate capacity for 60,000 calls a day averaging six minutes.**
+
+Strong: Average concurrency is 60,000 times 6 over 1,440 minutes, so 250 calls. Support traffic peaks around 3x after billing emails, so plan for 750 concurrent, and hold 900 streaming STT and TTS sessions with vendors for 20 percent headroom. At four turns a minute that is 50 turns per second at peak; with 3,500 prompt tokens per turn that is about 175,000 input tokens per second, so prompt caching and a small fast model tier are not optional. Twelve percent escalation on 750 concurrent six-minute calls is roughly 90 human handoffs an hour at peak, which sizes the desk. Cost is dominated by per-minute media prices, so shorter calls and fewer escalations save more than a cheaper model.
+
+Weak: "Autoscale it."
+
+**Q3. How do you guarantee a refund happens exactly once?**
+
+Strong: The model never executes anything; it emits a request. The tool layer derives an idempotency key from the call id, turn id, action, and target, checks policy including caller verification and amount limits, calls Stripe with that key so provider-side retries collapse, and writes an audit record. Durable execution replays nodes after a crash, so without the key a resume could duplicate the side effect; the key is what turns "resumed" into "not duplicated." Amounts above a limit pause the graph for human approval before any call is made.
+
+Weak: "Stripe handles retries."
+
+**Q4. How does escalation to a human work under a 30-second SLA?**
+
+Strong: The graph pauses with `interrupt`, carrying the transcript, the pending action, and the verification level. That payload is a task in the human desk queue, routed by skill and priority, and the console shows the context before the audio bridges. The caller hears an honest message and hold audio, not silence. When the human decides, the graph resumes with `Command(resume=...)`, possibly on a different worker, because the state is in the session store. If no human picks up within the SLA, a pre-chosen fallback runs: offer a callback and log the miss.
+
+Weak: "Transfer the call."
+
+**Q5. What happens when the TTS vendor hits its concurrency cap during a surge?**
+
+Strong: The platform should know before the vendor tells us. Admission control tracks in-use sessions per resource against ceilings with headroom and degrades in a pre-chosen order: drop to the standard voice, shorten prompts and disable retrieval, then offer a callback with an honest message. The last rung is never silence. Vendor errors on connect are treated as a ceiling hit and trigger the same ladder. Multi-vendor TTS behind an adapter is the structural fix, with voice consistency as the trade-off.
+
+Weak: "Add more quota."
+
+**Q6. How would you keep voice-to-voice latency under a second at this scale?**
+
+Strong: Budget it per stage and measure per stage per region. Stream every stage so only time-to-first-output is on the critical path. Keep the LLM prompt stable-to-volatile for prefix cache hits and use a small fast model for the conversational turn with a larger model behind a tool for hard reasoning. Co-locate media workers with the inference gateway and pin a call to one region. Speak a filler before tools and put hard timeouts on them. Then alert on p95 per stage so the regression is found at the stage that caused it.
+
+Weak: "Use the fastest model."
+
+**Q7. How do you evaluate the platform?**
+
+Strong: In layers computed from the event log. STT word error rate on our own recorded audio, with names and numbers weighted. Turn-taking: false end-of-turn rate, barge-in latency and correctness. Latency percentiles per stage and per region. Then transcript-level task success, policy adherence, and escalation appropriateness with an LLM judge calibrated against human review. The headline business metric is cost per resolved call, because it rises when quality drops. Recorded calls are replayed through the pipeline as a regression suite before every deploy.
+
+Weak: "Customer satisfaction surveys."
+
+## Build it yourself
+
+Extend the design's code into a small end-to-end simulation:
+
+1. Combine `Admission` and the call graph: each admitted call runs the graph; deferred calls receive a callback record.
+2. Add an SLA timer to the human desk: if no resume arrives within 30 simulated seconds, resume with `{"verdict": "timeout"}` and have `execute` offer a callback.
+3. Add cost events per call per resource (STT minutes, TTS tier, tokens with cache hit) and compute cost per resolved call from them.
+4. Inject a media worker crash after `understand` for 5 percent of calls and resume the thread on a "new worker."
+
+Acceptance checks:
+
+- Over 1,000 simulated calls, `len(stripe_calls)` equals the number of approved refunds; no key appears twice.
+- Every deferred call has a callback record; no call ends without a spoken outcome.
+- Calls that hit the SLA timeout have `outcome == "callback"` and appear in the scorecard's escalation metrics.
+- Crashed-and-resumed calls produce identical transcripts to uncrashed ones apart from a `resumed` marker.
+- Standard-tier TTS calls cost less than premium-tier calls in the cost events.
+
+## Key takeaways
+
+- Separate three lifetimes: media session, conversation, business action. Each gets its own store, failure handling, and retention.
+- Do the capacity arithmetic from business inputs; concurrency at peak sizes every vendor quota, and media minutes, not tokens, usually dominate cost.
+- Admission control with a pre-chosen degradation ladder is how you avoid the one unacceptable failure, silence.
+- Durable execution resumes; idempotency keys prevent duplicates. Both are needed for exactly-once consequential actions.
+- Escalation is `interrupt` with the transcript attached and `Command(resume=...)` from the human desk; the queue is a protocol concept now.
+- Evaluate in layers from the event log and report cost per resolved call, which rises when quality falls.

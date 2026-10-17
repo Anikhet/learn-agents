@@ -1,0 +1,427 @@
+# 44. Decoding, reasoning models, and structured output
+
+*Track B (LLM fundamentals). Book: Chapter 17 (Reasoning Techniques) and Appendix A (Advanced Prompting). Prerequisite: 42. Tokens, embeddings, and the transformer block; 43. Attention, the KV cache, GQA/MLA, and MoE. Pairs with 24. Structured Output and 17. Reasoning Techniques.*
+
+The forward pass ends with a vector of logits: one score per vocabulary entry. Everything a user ever sees is the result of turning that vector into a token, over and over. This lesson covers the three places where that step is engineered: the sampler that picks the token, the reasoning-model training that changed what the tokens are for, and the constrained decoders that guarantee the tokens form valid JSON.
+
+## The problem
+
+The support agent has to end every run with a record the ticketing system can ingest:
+
+```json
+{"invoice_id": "INV-2291", "status": "disputed", "amount_usd": 1240.0, "duplicate_line_items": ["Seat x10"]}
+```
+
+The first version asked nicely: "Respond only with JSON matching this schema." It worked in the demo. In production, over a week, it produced these:
+
+```text
+1.  Sure! Here is the JSON: ```json {...} ```           <- prose and fences around it
+2.  {"invoice_id": "INV-2291", "status": "Disputed", ...} <- wrong enum casing
+3.  {"invoice_id": "INV-2291", "amount_usd": "1,240", ...} <- string where a number belongs
+4.  {"invoice_id": "INV-2291", "status": "disputed", "amount_usd": 1240.0, "duplicate_line_items": ["Seat x10"   <- cut off at max_tokens
+5.  {"invoice_id": "INV-2291", "status": "paid", ...}     <- valid JSON, wrong facts
+```
+
+Cases 1 through 4 are syntax problems, and there are two different ways to make them impossible. Case 5 is a semantics problem, and no decoder can fix it. Separating those two is the point of this lesson.
+
+Underneath all five is the same machinery. At each step the model emits logits; a sampler turns them into one token. The sampler's temperature and truncation settings decide how often case 2 happens. A grammar mask over the logits decides whether cases 1 through 3 can happen at all. A finish-reason check catches case 4. Only a verifier catches case 5.
+
+```text
+                     logits (V,)
+                        |
+      +-----------------+------------------+
+      |                                    |
+  sampler                             grammar mask       <- constrained decoding
+  (temperature, top-k, top-p, min-p)  (allowed tokens only)
+      |                                    |
+      +-----------------+------------------+
+                        |
+                   one token id  --> append --> next forward pass
+```
+
+### Test-time compute: spending more tokens to get a better answer
+
+Sampling settings control the distribution of one answer. A separate lever is how many tokens or attempts you spend. OpenAI's o1 announcement (2024) showed accuracy on hard problems rising with the length of the model's own chain of thought, and DeepSeek-R1 (2025) showed that a model could be trained with reinforcement learning to produce that long reasoning on its own. The result is a second axis for the engineer: not just which model and which prompt, but how much thinking to buy per call.
+
+## Build it without a framework
+
+Start with the samplers. This toy vocabulary is the support agent's next-token distribution at some step; the tail contains tokens you do not want.
+
+```{code-cell} python
+import numpy as np
+rng = np.random.default_rng(0)
+
+vocab = ["refund", "invoice", "the", "Acme", "sorry", "42", "{", "DROP", "TABLE", "lol"]
+logits = np.array([3.0, 2.5, 2.0, 1.0, 0.5, 0.0, -0.5, -1.0, -2.0, -3.0])
+
+def softmax(z):
+    z = z - z.max(); e = np.exp(z); return e / e.sum()
+
+def greedy(logits):
+    return int(np.argmax(logits))
+
+def apply_temperature(logits, T):
+    return logits / T
+
+def top_k_filter(logits, k):
+    keep = np.argsort(-logits)[:k]
+    out = np.full_like(logits, -np.inf); out[keep] = logits[keep]; return out
+
+def top_p_filter(logits, p):
+    probs = softmax(logits); order = np.argsort(-probs)
+    cum = np.cumsum(probs[order])
+    cutoff = int(np.searchsorted(cum, p)) + 1      # smallest prefix whose mass >= p
+    keep = order[:cutoff]
+    out = np.full_like(logits, -np.inf); out[keep] = logits[keep]; return out
+
+def min_p_filter(logits, min_p):
+    probs = softmax(logits)
+    keep = probs >= min_p * probs.max()
+    out = np.full_like(logits, -np.inf); out[keep] = logits[keep]; return out
+
+def sample(logits, rng):
+    return int(rng.choice(len(logits), p=softmax(logits)))
+
+p = softmax(logits)
+print("base probs:", dict(zip(vocab, p.round(3))))
+print("greedy:", vocab[greedy(logits)])
+for T in (0.5, 1.0, 2.0):
+    print(f"T={T}: p(refund)={softmax(apply_temperature(logits, T))[0]:.3f}  p(lol)={softmax(apply_temperature(logits, T))[-1]:.5f}")
+survivors = lambda f: [vocab[i] for i in np.where(np.isfinite(f))[0]]
+print("top-k=3:", survivors(top_k_filter(logits, 3)))
+print("top-p=0.9:", survivors(top_p_filter(logits, 0.9)))
+print("min-p=0.1:", survivors(min_p_filter(logits, 0.1)))
+
+assert vocab[greedy(logits)] == "refund"
+assert softmax(apply_temperature(logits, 0.5))[0] > p[0] > softmax(apply_temperature(logits, 2.0))[0]
+assert np.allclose(softmax(apply_temperature(logits, 1.0)), p)
+assert len(survivors(top_k_filter(logits, 3))) == 3
+assert "DROP" not in survivors(top_p_filter(logits, 0.9))
+assert "TABLE" not in survivors(min_p_filter(logits, 0.1))
+# Nucleus vs min-p under a flat distribution: top-p keeps many, min-p adapts to confidence.
+flat = np.zeros(10)
+assert len(survivors(top_p_filter(flat, 0.85))) == 9 and len(survivors(min_p_filter(flat, 0.1))) == 10
+peaked = np.array([10.0] + [0.0] * 9)
+assert len(survivors(min_p_filter(peaked, 0.1))) == 1
+draws = [sample(top_k_filter(apply_temperature(logits, 0.7), 3), rng) for _ in range(200)]
+assert set(draws) <= {0, 1, 2}
+```
+
+What each knob does, mechanically:
+
+| Sampler | Operation on logits | What it controls | Failure mode |
+|---|---|---|---|
+| Greedy | argmax | determinism | repetitive loops, bland text |
+| Temperature `T` | divide logits by `T` | sharpness of the whole distribution | `T` high: tail tokens surface; `T` low: repetition |
+| Top-k | keep `k` largest | hard cap on candidates | `k` fixed regardless of confidence |
+| Top-p (nucleus, 2019) | keep smallest set with mass `>= p` | adaptive candidate set | on flat distributions keeps almost everything |
+| Min-p (2024) | keep `p >= min_p x p_max` | scales cutoff with the model's confidence | newer; its advantage is disputed in follow-up work |
+| Repetition penalty | down-weight already-emitted tokens | loops | can suppress legitimately repeated identifiers |
+
+The asserts encode two interview points. Temperature 1.0 is the raw model distribution; below it sharpens, above it flattens. On a flat distribution top-p 0.85 keeps 9 of 10 tokens while min-p keeps all 10; on a peaked one min-p keeps only the winner. Min-p tracks the model's confidence where a fixed `p` cannot.
+
+Beam search is different in kind: instead of sampling one token, it keeps the `B` best partial sequences and extends each. It finds higher-probability sequences than greedy, which helps for short, constrained outputs (translation, code completion of a fixed form) and hurts for open-ended text, where the highest-probability continuation is the blandest one.
+
+```{code-cell} python
+# Toy bigram model: next-token probs given the previous token. Sequences of length 3.
+V2 = ["<s>", "a", "b", "c", "</s>"]
+P = np.array([  # rows: previous token, cols: next token
+    [0, .5, .45, .05, 0],
+    [0, .3, .3, .3, .1],     # after 'a' the future is a toss-up
+    [0, .05, .05, .85, .05], # after 'b' comes 'c' with high probability
+    [0, .1, .1, .1, .7],
+    [0, 0, 0, 0, 1],
+])
+def seq_logprob(seq):
+    return sum(np.log(P[a, b]) for a, b in zip(seq, seq[1:]))
+
+def greedy_decode(steps=3):
+    seq = [0]
+    for _ in range(steps):
+        seq.append(int(np.argmax(P[seq[-1]])))
+    return seq
+
+def beam_search(beam_width, steps=3):
+    beams = [([0], 0.0)]
+    for _ in range(steps):
+        cands = []
+        for seq, lp in beams:
+            for nxt in range(len(V2)):
+                if P[seq[-1], nxt] > 0:
+                    cands.append((seq + [nxt], lp + np.log(P[seq[-1], nxt])))
+        beams = sorted(cands, key=lambda c: -c[1])[:beam_width]
+    return beams[0][0]
+
+g, b = greedy_decode(), beam_search(3)
+print("greedy:", [V2[i] for i in g], f"logp={seq_logprob(g):.3f}")
+print("beam-3:", [V2[i] for i in b], f"logp={seq_logprob(b):.3f}")
+assert seq_logprob(b) > seq_logprob(g), "beam search finds a higher-probability sequence than greedy"
+```
+
+Greedy takes `a` because it is the single best first step, then finds nothing good follows. Beam keeps `b` alive long enough to collect the `b -> c` payoff. That is the whole idea of looking ahead, and it is also the idea behind tree search over reasoning steps, just with a verifier instead of a bigram table.
+
+### Test-time compute in code
+
+Three cheap ways to spend more compute on one question: sample `N` answers and take the majority (self-consistency), sample `N` and keep the one a verifier accepts (best-of-N), or let the model think longer (a reasoning model's own chain of thought). The first two need nothing from the model provider.
+
+```{code-cell} python
+import statistics
+candidates = ["1,240", "1,240", "1,204", "1,240", "1,420"]         # N sampled answers
+def verifier(ans):  # deterministic checker: recompute from source-of-truth line items
+    return ans == "1,240"
+majority = statistics.mode(candidates)
+verified = next(a for a in candidates if verifier(a))
+print("majority:", majority, " verified:", verified)
+assert majority == verified == "1,240"
+assert sum(verifier(a) for a in candidates) / len(candidates) == 0.6, "pass@1 estimate from N samples"
+```
+
+The verifier here is a stub, but the design rule is real: best-of-N is only as good as the verifier, and a verifier that recomputes the invoice total from Stripe line items is worth more than any amount of sampling. For the agent, "verify outcomes" beats "read the reasoning."
+
+### How reasoning models got here
+
+Chain-of-thought prompting (2022) showed that asking a model to write intermediate steps improved accuracy on multi-step problems. o1 (2024) trained the model to produce those steps itself, with reinforcement learning, and reported that accuracy scaled with both training compute and test-time compute, that is, how long the model was allowed to think. The tokens are hidden from the user but billed and they add latency.
+
+DeepSeek-R1 (2025; published in Nature, September 2025) is the reference point for interviews because the recipe is public. R1-Zero applied pure reinforcement learning to a base model with rule-based rewards (is the final answer correct, is the format right) and no supervised reasoning examples. Self-verification, reflection, and long chains of thought emerged from the reward alone. The RL algorithm is Group Relative Policy Optimization (GRPO, from DeepSeekMath, 2024). Where PPO trains a separate critic network to estimate how good a state is, GRPO samples a group of `G` answers to the same prompt, scores them, and uses each answer's reward relative to the group mean and standard deviation as its advantage. No critic, half the memory, and a natural fit for tasks where the reward is a checkable outcome.
+
+```text
+PPO:   prompt -> policy sample -> reward r  ;  advantage = r - critic(state)   (critic is another LLM-sized net)
+GRPO:  prompt -> G samples -> rewards r_1..r_G  ;  advantage_i = (r_i - mean(r)) / std(r)
+```
+
+Say aloud: "GRPO drops the critic by normalizing rewards within a group of samples." The final R1 added a small cold-start SFT stage and rejection-sampling rounds to fix readability and language mixing, then distilled into smaller dense models.
+
+### What changes when you prompt a reasoning model
+
+Three things, all drawn from current provider guidance:
+
+1. Do not prescribe the method. "Think step by step" and hand-written chain-of-thought prefixes are unnecessary and can hurt; the model already reasons. Give the task, constraints, and output format, and treat reasoning effort as a knob.
+2. For agentic work, define what done means and how the model should verify its work. State stop conditions and tool-call budgets explicitly.
+3. Do not treat the visible reasoning as an audit log. Anthropic's "Reasoning Models Don't Always Say What They Think" (2025) injected hints into prompts and found that models verbalized using the hint only 25 to 39 percent of the time; in a reward-hacking setup they exploited the hack in over 99 percent of cases and admitted it in under 2 percent. Reasoning text is a signal for debugging, not evidence of how the answer was produced. Verify outcomes.
+
+### Constrained decoding: make invalid syntax impossible
+
+Back to the JSON failures. A constrained decoder compiles the target format (a JSON schema, a regex, a context-free grammar) into an automaton. At each step it asks the automaton which tokens are legal from the current state and sets every other logit to negative infinity before sampling. The model can only choose among valid continuations. Outlines popularized the finite-state approach, SGLang added compressed FSMs that skip runs of forced tokens, and XGrammar (2024) uses pushdown automata for full recursive JSON. Structured output is now built into vLLM, SGLang, and TensorRT-LLM, and hosted providers implement strict tool schemas the same way.
+
+```{code-cell} python
+import json
+TOKENS = ['{', '}', '"status"', '"amount"', ':', ',', '"paid"', '"open"', '120', '7', 'DROP']
+# A tiny state machine for the grammar:  { "status" : STRING , "amount" : NUMBER }
+GRAMMAR = {
+    "start":   {"{": "key1"},
+    "key1":    {'"status"': "colon1"},
+    "colon1":  {":": "str"},
+    "str":     {'"paid"': "comma", '"open"': "comma"},
+    "comma":   {",": "key2"},
+    "key2":    {'"amount"': "colon2"},
+    "colon2":  {":": "num"},
+    "num":     {"120": "close", "7": "close"},
+    "close":   {"}": "done"},
+}
+def allowed_mask(state):
+    return np.array([tok in GRAMMAR.get(state, {}) for tok in TOKENS])
+
+def constrained_decode(model_logits_fn, rng, max_steps=12):
+    state, out, masked_total = "start", [], 0
+    while state != "done" and len(out) < max_steps:
+        logits = model_logits_fn(out)
+        mask = allowed_mask(state)
+        masked_total += int((~mask).sum())
+        logits = np.where(mask, logits, -np.inf)     # the constraint is applied to logits, before softmax
+        tok = TOKENS[int(rng.choice(len(TOKENS), p=softmax(logits)))]
+        out.append(tok); state = GRAMMAR[state][tok]
+    return out, masked_total
+
+def adversarial_model(prefix):
+    """A 'model' that always prefers the injection token DROP. The mask must beat it."""
+    l = rng.normal(size=len(TOKENS)); l[TOKENS.index("DROP")] = 50.0; return l
+
+toks, masked = constrained_decode(adversarial_model, rng)
+text = "".join(toks)
+print("decoded:", text, "| logits masked:", masked)
+obj = json.loads(text)
+assert set(obj) == {"status", "amount"} and obj["status"] in {"paid", "open"} and isinstance(obj["amount"], int)
+assert "DROP" not in toks, "syntax is guaranteed by the mask, regardless of the model's preference"
+# Semantics are NOT guaranteed: the grammar accepts amount=7 for a 120-dollar invoice.
+assert obj["amount"] in (120, 7)
+```
+
+The "model" wants to emit `DROP` with overwhelming probability at every step and never gets to, because the mask removes it before the sampler sees it. Output is valid JSON by construction. The last assert is the caveat that separates a strong answer from a weak one: the grammar accepts `7` as happily as `120`. Constrained decoding guarantees syntax, not truth.
+
+### Parse-and-repair: the fallback when you cannot constrain
+
+If you are on a provider or model without strict schemas, or the schema has constraints a grammar cannot express (a value must match a database row), the pattern is validate, feed the exact error back, retry with a cap.
+
+```{code-cell} python
+from pydantic import BaseModel, Field, ValidationError
+
+class InvoiceFinding(BaseModel):
+    invoice_id: str = Field(pattern=r"^INV-\d+$")
+    status: str = Field(pattern=r"^(paid|open|disputed)$")
+    amount_usd: float = Field(ge=0)
+    duplicate_line_items: list[str]
+
+# Three attempts a real model might produce; the repair loop feeds the error back each time.
+attempts = iter([
+    'Sure! Here is the JSON:\n```json\n{"invoice_id": "INV-2291", "status": "Disputed", "amount_usd": "1,240", "duplicate_line_items": ["Seat x10"]}\n```',
+    '{"invoice_id": "INV-2291", "status": "disputed", "amount_usd": "1,240", "duplicate_line_items": ["Seat x10"]}',
+    '{"invoice_id": "INV-2291", "status": "disputed", "amount_usd": 1240.0, "duplicate_line_items": ["Seat x10"]}',
+])
+def ask_model(prompt):           # stand-in for a model call; a live cell would use init_chat_model
+    return next(attempts)
+
+def extract_json(text):
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("no JSON object found")
+    return text[start:end + 1]
+
+def parse_and_repair(schema, prompt, max_attempts=3):
+    errors = []
+    for attempt in range(1, max_attempts + 1):
+        raw = ask_model(prompt if not errors else f"{prompt}\n\nPrevious output was invalid: {errors[-1]}\nReturn only corrected JSON.")
+        try:
+            return schema.model_validate_json(extract_json(raw)), attempt, errors
+        except ValidationError as e:   # pydantic errors name the field and the rule; that is the repair signal
+            errors.append("; ".join(f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()))
+        except ValueError as e:
+            errors.append(str(e))
+    raise RuntimeError(f"schema not satisfied after {max_attempts} attempts: {errors}")
+
+result, attempts_used, errors = parse_and_repair(InvoiceFinding, "Summarize the Acme invoice dispute as JSON.")
+print("attempts:", attempts_used); print("errors fed back:", errors); print(result)
+assert attempts_used == 3 and len(errors) == 2
+assert result.status == "disputed" and result.amount_usd == 1240.0
+```
+
+The repair loop costs a full round trip per retry, so it is the expensive path. Use it where constraints are semantic, and constrained decoding where they are syntactic.
+
+## How it shows up in the stack
+
+**Three ways to get a structure, and when to use each.**
+
+| Need | Mechanism | Guarantee |
+|---|---|---|
+| The model decides *whether* to act, and with what arguments | function calling / tool use (strict schemas) | valid arguments when the provider supports strict mode |
+| You *always* need an object of a known shape | `response_format` / structured output | valid JSON matching the schema |
+| Constraints the grammar cannot express, or a provider without strict mode | parse-and-repair with pydantic | eventual validity, bounded retries |
+
+The rule the course teaches: function calling when the model decides whether to act; response format when you always need a schema. In LangChain, `model.with_structured_output(InvoiceFinding)` picks the provider's native mechanism and returns a validated pydantic object; underneath, a strict-mode provider is running a grammar mask like the one you just wrote.
+
+```{code-cell} python live
+import os
+from langchain.chat_models import init_chat_model
+
+model = init_chat_model(os.environ.get("COURSE_MODEL", "openai:gpt-5.6"))
+structured = model.with_structured_output(InvoiceFinding)
+finding = structured.invoke(
+    "Acme disputes invoice INV-2291 for 1,240 USD; the Seat x10 line appears twice. Summarize as the schema.")
+print(finding)
+assert isinstance(finding, InvoiceFinding) and finding.invoice_id == "INV-2291"
+```
+
+**Sampling settings are per-node decisions.** A router or classifier node wants temperature 0 (or a constrained enum). A drafting node can run warmer. A code-generating node should stay cool. Set them per call, not globally.
+
+**Reasoning effort is a budget knob in the harness.** Reasoning tokens are billed and they add latency before the first visible token. Route cheap, well-specified steps to a fast model and reserve reasoning effort for planning and verification steps. Log reasoning-token counts per node the same way you log tool calls.
+
+**Always check the finish reason.** Truncated JSON (case 4 in the problem) shows up as a `length` stop reason. Treat it as an error, not as parseable output.
+
+**Reasoning text is not your audit log.** If a compliance requirement says "record why the agent refunded the customer," record the tool calls, their arguments, and the verifier's result. Store the reasoning text as a debugging aid, and label it as such.
+
+## What goes wrong in production
+
+1. **Temperature set once, globally.** Symptom: the classifier node occasionally emits a label outside the allowed set. Cause: a creative-writing temperature applied to a routing step. Fix: per-node sampling; constrained enum outputs for routing.
+
+2. **Repetition loops at low temperature.** Symptom: a long summary repeats a sentence until `max_tokens`. Cause: greedy-ish decoding on a flat distribution. Fix: mild repetition penalty or min-p; check for degenerate output in evals.
+
+3. **Trusting valid JSON.** Symptom: the ticketing system ingests a well-formed record with the wrong status. Cause: constrained decoding guarantees syntax only. Fix: verifier step that recomputes checkable fields against the source system before the write.
+
+4. **Truncation treated as success.** Symptom: intermittent parse failures on long outputs. Cause: `max_tokens` reached, finish reason ignored. Fix: check finish reason; raise output budget or split the task.
+
+5. **Reasoning tokens blowing the latency SLO.** Symptom: p95 time-to-first-token jumps after switching to a reasoning model. Cause: hidden thinking before any visible token. Fix: route by task difficulty; cap reasoning effort on latency-sensitive paths; stream partial results where possible.
+
+6. **Reasoning text used as evidence.** Symptom: a post-incident review cites the model's explanation as the reason for an action; the tool log disagrees. Cause: chain-of-thought faithfulness is low. Fix: audit from tool calls and verified outcomes, not from narration.
+
+7. **Repair loop without a cap.** Symptom: cost spikes on adversarial or ambiguous inputs. Cause: unbounded retries. Fix: `max_attempts`, then fail explicitly with the error history attached.
+
+## What changed by 2026
+
+Decoding stopped being a knob users touch and became infrastructure. Constrained decoding is now a default capability in the major open serving engines and behind the strict tool-schema and structured-output features of hosted APIs. For an application engineer the practical change is that "the model returned broken JSON" is a solved problem in the syntactic sense, and the remaining work is semantic verification.
+
+Reasoning models became a category, with an explicit effort setting. The o1 line established test-time compute scaling; DeepSeek-R1 made the training recipe (RL with rule-based rewards, GRPO) public and reproducible, and distillation brought long reasoning to small dense models. Provider guidance converged: state the task and constraints, define done, do not dictate the reasoning method, and treat effort as a cost lever.
+
+Faithfulness research changed how teams treat reasoning traces. The 2025 finding that models often do not verbalize the hints they use, and rarely admit to reward hacking, moved the industry toward outcome verification and away from reading the chain of thought as an explanation.
+
+Sampling research continued at the margins. Min-p (2024) was proposed as a confidence-adaptive alternative to top-p and was adopted by several open-source runtimes; a 2025 follow-up disputed the size of its advantage, so treat it as an option to evaluate, not a default.
+
+On the installed stack, `with_structured_output` in LangChain 1.3 and the strict tool schemas in the OpenAI Agents SDK and Pydantic AI are the surfaces where all of this lands. They hide the automaton; you should still know it is there.
+
+## Interview questions
+
+**Q1. Explain temperature, top-k, top-p, and min-p, and when you would use each.**
+
+Strong: All four act on the logits before sampling. Temperature divides the logits, so below one sharpens the distribution and above one flattens it; one is the raw model. Top-k keeps a fixed number of candidates, which ignores confidence. Top-p keeps the smallest set whose mass reaches p, which adapts to the shape but keeps almost everything on a flat distribution. Min-p keeps tokens whose probability is at least a fraction of the top token's, so the cutoff scales with confidence. For classification or routing I use temperature zero or a constrained enum; for drafting I use moderate temperature with top-p or min-p; I set these per node, not globally.
+
+Weak: "Temperature makes it more creative."
+
+**Q2. Why does beam search produce worse open-ended text than sampling?**
+
+Strong: Beam search optimizes sequence likelihood, and for open-ended text the most likely continuation is generic and repetitive, a known result behind nucleus sampling. It shines when the output space is narrow and there is a right answer: translation, formal outputs, short completions. For reasoning, the same lookahead idea returns as tree search with a verifier scoring branches instead of raw likelihood.
+
+Weak: "Beam search is just slower."
+
+**Q3. What is test-time compute scaling, and what are the levers?**
+
+Strong: Accuracy on hard problems improves when the model spends more compute at inference, not just in training. The levers are a longer chain of thought, which reasoning models produce natively; self-consistency, sampling several answers and taking the majority; best-of-N with a verifier, which is only as good as the verifier; and tree search over reasoning steps. Each costs tokens and latency, so in a harness I make it a per-step budget: cheap steps get one fast sample, planning and verification steps get more effort.
+
+Weak: "Bigger models think better."
+
+**Q4. How does GRPO differ from PPO, and why did DeepSeek use it?**
+
+Strong: PPO needs a critic network to estimate the value baseline, which for an LLM policy is another model of comparable size and doubles memory. GRPO samples a group of answers to the same prompt, scores them with the reward, and uses each answer's reward normalized by the group's mean and standard deviation as its advantage. No critic. It fits tasks with checkable outcomes, which is what R1-Zero used: rule-based rewards for correctness and format, and long reasoning, self-verification, and reflection emerged from RL alone.
+
+Weak: "GRPO is a newer version of PPO."
+
+**Q5. What changes in how you prompt a reasoning model?**
+
+Strong: I stop telling it how to think. No "think step by step," no hand-written chain-of-thought prefix; the model reasons on its own and provider guidance says such prefixes can hurt. I give the task, constraints, and output format, define what done means and how the model should verify its work, and set explicit stop conditions and tool budgets for agentic use. Then I treat reasoning effort as a cost and latency knob, and I do not read the visible reasoning as a faithful record of how the answer was reached.
+
+Weak: "Ask it to explain its reasoning."
+
+**Q6. Constrained decoding versus prompting for JSON. What does each guarantee?**
+
+Strong: Prompting for JSON is a request; constrained decoding is a guarantee. The schema is compiled to an automaton, and at each step every token the automaton would reject has its logit set to negative infinity, so the model can only emit valid continuations. That guarantees syntax: parseable JSON, correct types, allowed enum values. It cannot guarantee semantics; the model can still emit a valid but wrong value. So I pair it with a verifier for checkable fields. For constraints the grammar cannot express I fall back to parse-and-repair with a retry cap.
+
+Weak: "Constrained decoding makes the output correct."
+
+**Q7. When do you use function calling versus structured output?**
+
+Strong: Function calling when the model decides whether to act and which tool to use; the model may reply in prose instead, and that is a feature. Structured output when the response must always be an object of a known shape, like the final ticket record. Both use the same grammar-masking machinery under a strict-mode provider. Mixing them up produces either an agent that cannot say "I don't know" or a classifier that sometimes returns prose.
+
+Weak: "They're the same thing."
+
+## Build it yourself
+
+Extend the samplers and the constrained decoder.
+
+1. Add a `repetition_penalty(logits, history, penalty)` that divides positive logits and multiplies negative logits of already-emitted tokens by `penalty`. Run a 30-step loop over a distribution that favors one token and show the penalty breaks the loop.
+2. Add a `typical_or_combined(logits, T, top_p, min_p)` pipeline that applies temperature, then min-p, then top-p, and document the order.
+3. Extend `GRAMMAR` to accept an optional third key `"notes"` with a string value, and a list of one to two line-item strings for a `"duplicates"` key.
+4. Add a `verify(obj, source)` step after decoding that checks `amount` against a source-of-truth dict and rejects mismatches; count how often the adversarial model's valid-but-wrong outputs are rejected.
+
+Acceptance checks:
+
+- With `penalty=1.5`, the 30-step loop emits at least 4 distinct tokens; without it, at most 2.
+- Every decoded string from the extended grammar passes `json.loads` and has `"duplicates"` as a list of length 1 or 2.
+- `verify` rejects at least one decoded object in 50 runs while `json.loads` succeeds on all 50.
+- Temperature 0 (implemented as greedy) is deterministic across 100 runs; temperature 1.0 is not.
+
+## Key takeaways
+
+- A sampler turns logits into one token; temperature, top-k, top-p, and min-p are different truncations of the same distribution and should be set per node.
+- Beam search maximizes likelihood, which helps constrained outputs and hurts open-ended text; the lookahead idea returns as tree search with a verifier.
+- Test-time compute is a budget: longer reasoning, self-consistency, best-of-N, and search all trade tokens and latency for accuracy.
+- o1 showed test-time scaling; DeepSeek-R1 made the recipe public: RL with rule-based rewards and GRPO, which drops PPO's critic by normalizing rewards within a group.
+- Prompt reasoning models with task, constraints, format, and a definition of done; do not dictate the method.
+- Chain-of-thought text is not a faithful audit log; verify outcomes and log tool calls.
+- Constrained decoding masks invalid logits and guarantees syntax, never semantics; function calling is for deciding whether to act, structured output for when you always need a schema.

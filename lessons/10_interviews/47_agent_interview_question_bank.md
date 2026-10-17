@@ -1,0 +1,707 @@
+# 47. Interview question bank: agents, RAG, evals, internals, system design
+
+*Track D (infra + interviews). Maps to no single book chapter: it is the spoken-answer companion to the whole course. Prerequisites: whichever lessons the **Study** pointers under each question name; read 00. Course orientation first.*
+
+This lesson deviates from the fixed lesson skeleton. It is a question bank. Every question below is taken verbatim from the interview repository (pallavi-shekhar/ai-engineering-interview-questions-company-wise), which compiles "real interview questions asked in AI Engineering interviews at 35 companies" from publicly reported interview experiences. The company tags in parentheses are the repository's tags. They are publicly reported signals compiled by the repository, not guarantees that a given company asks that question today, and the untagged questions are ones the repository lists without a company.
+
+Each question gets three things: a **Strong answer** written the way you should say it aloud, one line on what a **Weak answer sounds like**, and a **Study** pointer to the lesson numbers in this course that teach the mechanism.
+
+## How to use this bank
+
+The bank is for speaking practice, not reading practice. Reading a strong answer and nodding is the weakest possible use of it. The interviewer will hear you, not read you, and the gap between "I know this" and "I can say this in ninety seconds without notes" is the gap most candidates fall into.
+
+Practice like this:
+
+1. Draw a set of five to eight questions (the second code cell does this with a fixed seed so you can repeat a set).
+2. For each question, say the answer aloud in three to eight sentences. Time it. Two minutes is the ceiling for a first answer; the interviewer will ask follow-ups.
+3. Every answer must do four things: name the mechanism (what actually happens underneath), name the tradeoff (what you give up), name the failure mode (how it breaks in production), and end with what you would measure or check. If you cannot name a failure mode, you do not understand the mechanism yet.
+4. After you answer, read the strong answer and the weak-answer line. Mark yourself on one question only: did my answer sound like the weak one?
+5. Open the **Study** lesson for anything you got wrong. Do not re-read the answer here; go rebuild the mechanism from the from-scratch code in that lesson.
+
+A rhythm that works for most people: one drawn set per day, mixed across areas, for two weeks. Then a second pass restricted to the area you are weakest in.
+
+```text
+draw set (seed) -> speak (<= 2 min each) -> compare to strong/weak
+                                              |
+                                              v
+                              wrong? -> Study lesson -> rebuild the code
+```
+
+Three habits separate strong from weak answers across every area in this bank:
+
+- **Say the number.** "The KV cache is 320 KiB per token for Llama-3-70B in FP16" beats "the KV cache gets big."
+- **Say who decides.** "The model chooses the tool; my software executes it and enforces the policy" is the sentence behind half the agent questions.
+- **Say how you would know.** Every design answer ends with an eval, a metric, or a log field. Interviewers at the companies tagged here ask "how would you know it works?" as the first follow-up almost every time.
+
+The first code cell builds the bank as data so you can filter, shuffle, and extend it. The answers themselves live in the prose below; the cell carries the question, area, tags, and study pointers.
+
+```{code-cell} python
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class Question:
+    area: str
+    text: str
+    companies: tuple  # reported signals from the interview repository, not guarantees
+    study: tuple      # lesson numbers in this course
+
+
+AREAS = (
+    "Agents and Tool Use",
+    "RAG and Retrieval",
+    "Evaluation and Observability",
+    "LLM Internals and Architecture",
+    "AI System Design",
+)
+
+BANK = [
+    # Agents and Tool Use
+    Question(AREAS[0], "Explain the ReAct pattern and what it solves over chain-of-thought alone.", (), ("05", "17")),
+    Question(AREAS[0], "How do you handle tool-call errors, timeouts and retries in an agentic loop?", ("OpenAI", "Cognition"), ("12", "36", "40")),
+    Question(AREAS[0], "What is the difference between structured output and function calling?", ("Mistral AI", "Apple"), ("44", "05", "24")),
+    Question(AREAS[0], "What is MCP (Model Context Protocol) and how does it differ from traditional function calling?", ("Microsoft",), ("10", "05")),
+    Question(AREAS[0], "How many tools is too many? How do you design tool schemas an LLM can actually use correctly?", ("Anthropic", "Cognition"), ("40", "41", "05", "34")),
+    Question(AREAS[0], "How does multi-agent orchestration work, and when does it break down?", ("Cognition",), ("07", "15")),
+    Question(AREAS[0], "Design memory for a long-running agent: what do you store, where, and how do you retrieve it?", ("Anthropic",), ("08", "34")),
+    Question(AREAS[0], "How does an agent decide when to call a tool versus answer from its own knowledge?", (), ("05", "40", "02")),
+    Question(AREAS[0], "What makes an agent loop terminate correctly? How do you bound cost and steps?", (), ("11", "16")),
+    Question(AREAS[0], "How do you make an agent's actions reversible, or at least auditable, in a production system?", ("Palantir",), ("36", "13", "39", "32")),
+    Question(AREAS[0], "Design human-in-the-loop approval for an agent that takes consequential actions.", ("OpenAI", "Palantir"), ("13", "36")),
+    Question(AREAS[0], "Your agent drifts after a long run and confidently works on the wrong thing. Diagnose it.", ("Cognition",), ("34", "43", "11", "28")),
+    # RAG and Retrieval
+    Question(AREAS[1], "What chunking strategy would you use for a large technical documentation corpus, and why?", ("Glean",), ("14", "29")),
+    Question(AREAS[1], "How do you choose between a sparse retriever (BM25) and a dense retriever? When do you need both?", ("Microsoft", "Perplexity", "Glean"), ("45", "14", "29")),
+    Question(AREAS[1], "What is a reranker, when should you use one, and what does a cross-encoder cost you?", ("Cohere", "Microsoft", "Perplexity"), ("45", "29")),
+    Question(AREAS[1], "How would you evaluate the quality of a RAG pipeline: retrieval and generation separately?", ("Cohere",), ("45", "19", "22", "29")),
+    Question(AREAS[1], "What is HyDE and when does it outperform standard dense retrieval?", (), ("29", "21")),
+    Question(AREAS[1], "How does agentic RAG differ from standard RAG, and when is the extra complexity justified?", (), ("14", "29", "21")),
+    Question(AREAS[1], "What causes semantic drift in embedding search and how do you detect it?", ("Cohere",), ("25", "29")),
+    Question(AREAS[1], "Design permission-aware retrieval: users must never see content they can't access in the source system.", ("Microsoft", "Databricks", "Glean", "Palantir"), ("46", "45", "29", "39")),
+    Question(AREAS[1], "Compare HNSW, IVF-PQ and flat indexes. How do you pick, and what does recall@k cost in latency?", (), ("45", "29", "25")),
+    Question(AREAS[1], "How do you handle tables, figures and multi-column PDFs in a retrieval pipeline?", (), ("14", "29")),
+    Question(AREAS[1], "How do you keep an index fresh when the underlying corpus changes continuously?", ("Perplexity", "Cursor"), ("29", "45")),
+    Question(AREAS[1], "How do you attribute every claim in a generated answer to a specific retrieved span?", ("Perplexity", "Harvey", "Abridge"), ("29", "26", "24")),
+    # Evaluation and Observability
+    Question(AREAS[2], "Design an LLM-as-judge evaluation. What are its known biases and how do you correct for them?", ("Perplexity",), ("19", "22")),
+    Question(AREAS[2], "How do you build an eval set when there is no labelled ground truth and experts are expensive?", ("Cohere", "Harvey"), ("22", "19")),
+    Question(AREAS[2], "How do you detect and measure hallucinations in a production RAG system?", ("Anthropic", "OpenAI", "Cursor"), ("22", "29", "26")),
+    Question(AREAS[2], "Design the regression gate that decides whether a prompt or model change ships.", ("Anthropic",), ("22", "37")),
+    Question(AREAS[2], "Why do benchmark scores improve while users say the system got worse? Enumerate the reasons.", ("Cognition",), ("22", "37", "19")),
+    Question(AREAS[2], "What is benchmark contamination and how do you guard against it?", ("Zhipu AI", "Alibaba", "Scale AI"), ("22", "30")),
+    Question(AREAS[2], "What observability does a production LLM system need: traces, spans, costs, feedback?", (), ("32", "19")),
+    Question(AREAS[2], "How do you manage prompt versioning and rollbacks in production?", (), ("22", "30", "32")),
+    Question(AREAS[2], "Design online evaluation: what do you log, what do you sample, and what do you A/B?", ("Perplexity",), ("19", "37", "32")),
+    Question(AREAS[2], "How would you evaluate an agent, as opposed to a single model response?", ("Moonshot AI", "Zhipu AI", "Scale AI", "Cognition"), ("37", "22")),
+    # LLM Internals and Architecture
+    Question(AREAS[3], "Explain scaled dot-product attention and why the 1/sqrt(d_k) scaling factor matters.", (), ("43", "F")),
+    Question(AREAS[3], "What is the KV cache, and what are its memory implications at scale? Derive the formula.", ("OpenAI", "xAI", "Mistral AI", "Amazon", "Apple", "NVIDIA", "Together AI", "Character.AI"), ("43", "38", "F")),
+    Question(AREAS[3], "What are MQA and GQA, and what do they trade away?", ("Meta", "Mistral AI"), ("43", "38")),
+    Question(AREAS[3], "What is Multi-head Latent Attention (MLA) and why did DeepSeek introduce it?", ("DeepSeek", "Moonshot AI"), ("43", "38")),
+    Question(AREAS[3], "Explain FlashAttention. It does not reduce FLOPs, so why is it faster?", ("Together AI",), ("43", "38")),
+    Question(AREAS[3], "How does Byte Pair Encoding work, and what are its failure modes (numbers, code, non-Latin scripts)?", ("Alibaba", "Sarvam AI", "Hugging Face"), ("42", "16")),
+    Question(AREAS[3], "What is positional encoding in transformers, and how has it evolved (sinusoidal, learned, RoPE, ALiBi)?", (), ("43", "F")),
+    Question(AREAS[3], "Explain RoPE and how position interpolation / YaRN extend context beyond the trained length.", ("Meta", "Moonshot AI", "Alibaba"), ("43", "34")),
+    Question(AREAS[3], "What do the Chinchilla scaling laws say, and how do they differ from earlier scaling intuitions?", ("Anthropic",), ("F", "30")),
+    Question(AREAS[3], "What is a mixture-of-experts architecture and how does it scale capacity without scaling FLOPs?", ("Mistral AI", "Cohere", "DeepSeek", "Moonshot AI", "Zhipu AI", "Alibaba"), ("43", "38")),
+    Question(AREAS[3], "Explain the difference between pre-training, supervised fine-tuning and preference optimisation.", ("Meta", "Scale AI"), ("30", "44", "F")),
+    Question(AREAS[3], "Compare greedy, beam search, top-k, top-p and temperature sampling. When does each fail?", ("Google DeepMind", "Apple", "Perplexity"), ("44", "F")),
+    Question(AREAS[3], "What is the lost-in-the-middle problem in long contexts and how do you address it?", ("Moonshot AI",), ("43", "34", "29")),
+    Question(AREAS[3], "Why is LayerNorm placed pre-block in modern transformers, and what is RMSNorm?", (), ("42",)),
+    Question(AREAS[3], "Explain SwiGLU and why gated activations replaced ReLU/GELU in modern LLM MLP blocks.", ("Meta",), ("42",)),
+    Question(AREAS[3], "Walk me through what happens, tensor by tensor, in one forward pass of a decoder-only transformer.", ("Anthropic",), ("42", "43", "38")),
+    # AI System Design
+    Question(AREAS[4], "Design an enterprise RAG assistant over 10M documents with per-user permissions.", ("OpenAI", "Microsoft", "Amazon", "Databricks", "Scale AI"), ("46", "45", "29", "39")),
+    Question(AREAS[4], "Design a code assistant: repo indexing, context assembly, edit application, evaluation.", ("Cursor",), ("46", "G", "34", "33")),
+    Question(AREAS[4], "Design a customer-support agent that can take real actions, with escalation to humans.", ("Sierra", "consumer-scale ML companies"), ("46", "28", "13", "18")),
+    Question(AREAS[4], "Design semantic search over a large product catalogue.", ("Character.AI",), ("45", "25", "29")),
+    Question(AREAS[4], "Design a content-moderation system combining classifiers and LLMs.", ("Meta",), ("18", "02", "19")),
+    Question(AREAS[4], "Design a document-intelligence pipeline: scanned PDFs in, structured fields out, at 10M documents.", ("Palantir",), ("24", "44", "26", "12")),
+    Question(AREAS[4], "Design a Text-to-SQL system over a warehouse with thousands of tables.", ("Databricks", "Palantir"), ("40", "05", "29", "33")),
+    Question(AREAS[4], "Design a meeting assistant: recording, diarisation, summary, action items, integrations.", ("Microsoft",), ("23", "27", "26")),
+    Question(AREAS[4], "Design an LLM gateway: routing across providers, failover, caching, budgets and rate limits.", ("Perplexity", "Palantir"), ("46", "38", "16", "12")),
+    Question(AREAS[4], "Design the serving stack for a consumer chat assistant at hundreds of millions of users.", ("Anthropic", "OpenAI", "Google DeepMind", "Meta", "xAI"), ("38", "43", "27")),
+]
+
+# Every pointer must name a lesson that exists in this course (numbers) or an appendix (letters).
+KNOWN_LESSONS = {f"{n:02d}" for n in range(0, 48)} | set("ABCDEFGH")
+
+for q in BANK:
+    assert q.area in AREAS, q.text
+    assert q.text.strip() and q.text.strip()[-1] in ".?", q.text
+    assert q.study, f"no study pointer: {q.text}"
+    assert set(q.study) <= KNOWN_LESSONS, (q.text, q.study)
+    assert isinstance(q.companies, tuple)
+
+by_area = {a: sum(1 for q in BANK if q.area == a) for a in AREAS}
+assert len(BANK) == 60 and len({q.text for q in BANK}) == 60
+assert by_area == {AREAS[0]: 12, AREAS[1]: 12, AREAS[2]: 10, AREAS[3]: 16, AREAS[4]: 10}
+tagged = sum(1 for q in BANK if q.companies)
+print(f"{len(BANK)} questions, {tagged} with company tags, per area: {by_area}")
+```
+
+## Agents and Tool Use
+
+### Explain the ReAct pattern and what it solves over chain-of-thought alone.
+
+**Strong answer.** ReAct interleaves reasoning text with actions: the model writes a short thought, emits a tool call, my software executes it and appends the observation, and the model reasons again with that observation in context. Chain-of-thought alone is a closed loop inside the model's own parameters: it can reason for pages, but every fact it reasons over comes from training data or the prompt, so a wrong premise never gets corrected. ReAct opens the loop to the world, which is what turns a language model into an agent: the model chooses, the application executes, and the result feeds back. The tradeoff is cost and latency per step and a new failure surface, because every observation is untrusted input the model will act on. In 2026 I would add two caveats: with reasoning models you do not prescribe "think step by step," you let the model reason and constrain the actions, and the visible reasoning text is a useful signal but not a faithful audit log, so you verify outcomes rather than trusting the narration. The production form of ReAct is the tool-calling loop in 05, and the loop has to have a termination condition or it is a very expensive way to spin.
+
+**Weak answer sounds like:** "ReAct means Reason and Act, the model thinks and then does things," with no mention of who executes the action or what the observation does to the next step.
+
+**Study:** 05, 17
+
+### How do you handle tool-call errors, timeouts and retries in an agentic loop? (OpenAI, Cognition)
+
+**Strong answer.** I split errors into three classes and treat each differently. Transient infrastructure errors, like connection resets and 5xx, are retried by my software with exponential backoff and jitter, inside a bounded attempt count, and the model never sees them. Semantic errors, like "invoice not found" or a validation failure on the arguments, go back to the model as a tool result with actionable text, because the model is the thing that can change the arguments; a bare stack trace wastes the turn. Policy errors, like a permission denial, terminate or escalate rather than retry, because retrying a forbidden action is how you get a very persistent security incident. Timeouts are a budget question: each tool call gets a deadline, the loop gets a wall-clock and step budget, and a timed-out write is treated as unknown, not failed, so the retry has to be idempotent with a request key. The failure mode people miss is that a retry on the model side re-runs the node from the top, so any side effect before the failure happens twice unless it is idempotent. In LangGraph this is `RetryPolicy` on a node plus a checkpointer so a crash resumes from the last completed step, and the same rule applies: anything before an `interrupt` or a retry boundary must be safe to repeat.
+
+**Weak answer sounds like:** "Wrap it in a try/except and retry three times."
+
+**Study:** 12, 36, 40
+
+### What is the difference between structured output and function calling? (Mistral AI, Apple)
+
+**Strong answer.** Both are implemented the same way underneath: the provider compiles a schema into a grammar and masks invalid logits during decoding, so the syntax is guaranteed and the semantics are not. The difference is who decides whether to act. Function calling gives the model a menu of tools and lets it decide whether to call one, which one, and with what arguments; the schema constrains the arguments if it does. Structured output, `response_format`, says every response must match this schema, no choice involved. So I use function calling when the model is deciding whether to take an action and structured output when I always need a typed record back, like an extraction or a classification. The tradeoff is that forcing a schema when the model might legitimately need to say "I don't know" produces confident garbage in valid JSON. Practically, in the support agent, the planning step is structured output and the Stripe refund is a tool call, because the refund is a choice and the plan is a record.
+
+**Weak answer sounds like:** "Structured output is JSON mode and function calling is for calling APIs," with no mention of the decision the model is or is not making.
+
+**Study:** 44, 05, 24
+
+### What is MCP (Model Context Protocol) and how does it differ from traditional function calling? (Microsoft)
+
+**Strong answer.** Function calling is the model-to-application interface: the model sees tool schemas in its context and emits a call. MCP is the application-to-tool-server interface: a standard wire protocol over stdio or Streamable HTTP by which a host discovers and invokes tools, resources, and prompts from servers it did not write. The host creates one client per server, merges every server's tools into the single registry the model sees, and enforces consent; servers never see the whole conversation or each other. That framing is the course's, not the spec's, but it is the mechanism. The tradeoff is that MCP moves the integration cost from every application to every server, and it also expands the attack surface: tool descriptions and results from a server are untrusted input in the model's context. The 2026-07-28 revision is worth knowing because it changed the shape: the protocol core is now stateless, the initialize handshake and session ids are gone, every request carries the protocol version, and listings return cache TTLs so hosts can prompt-cache tool lists; sampling and roots were deprecated, and long-running work moved to a Tasks extension. So the honest one-liner is: function calling is how the model asks, MCP is how the application finds and calls what it asked for.
+
+**Weak answer sounds like:** "MCP is a USB-C port for tools," with no account of host, client, server roles or what the model actually sees.
+
+**Study:** 10, 05
+
+### How many tools is too many? How do you design tool schemas an LLM can actually use correctly? (Anthropic, Cognition)
+
+**Strong answer.** There is no fixed number, but there are two thresholds. The first is context cost: every tool description is tokens on every turn, and Deep Agents 0.7 cut its default tool-description tokens by 43 percent for exactly that reason. The second is choice confusion: overlapping tools with vague names produce wrong picks, and that failure grows faster than linearly. Anthropic's tool-design guidance is the checklist I actually use: namespace by service and resource, `stripe_refund` rather than `refund`; consolidate primitives into the operation the agent actually wants, `search_logs` rather than `read_logs`; return semantic fields rather than raw UUIDs; paginate and truncate results with a hard cap; make error text tell the model what to do next; and name parameters unambiguously, `customer_id` not `id`. Beyond a few dozen tools I stop putting them all in context and retrieve them: describe tools in a store, let a lightweight selector pick the relevant subset per turn, which LangChain ships as tool-selector middleware. The test is not my opinion of the schema, it is an eval: run real multi-step tasks and track accuracy, tool-call count, and error rate, then rewrite the description like onboarding a new hire until the numbers move.
+
+**Weak answer sounds like:** "Keep it under ten and write good descriptions."
+
+**Study:** 40, 41, 05, 34
+
+### How does multi-agent orchestration work, and when does it break down? (Cognition)
+
+**Strong answer.** Mechanically, a supervisor agent decomposes a task and dispatches subtasks to worker agents, each with its own context window, tools, and prompt; workers return a condensed result and the supervisor integrates. The reason to do it is context isolation: a subagent can burn fifty tool calls on a search and hand back a two-thousand-token summary, which keeps the parent's context clean. It breaks down when the subtasks are not independent, because the workers cannot see each other's decisions and the supervisor cannot see their reasoning, so you get conflicting actions and a merge problem no one is equipped to solve; Cognition's own writeup on this argued for a single long-context agent by default for exactly that reason. It also breaks down on cost, because every handoff re-explains the world. My rule is: parallelize reads, never parallelize writes to shared state; make every handoff a typed message with what was decided and what is open; and start with one agent plus good context engineering, adding subagents only when a single context demonstrably runs out. When I do split, the protocol matters less than the contract: in LangGraph that is `Send` for fan-out and a reducer for fan-in, and the reducer is where the merge conflicts surface.
+
+**Weak answer sounds like:** "You have a manager agent and specialist agents, like a team," with no failure mode.
+
+**Study:** 07, 15
+
+### Design memory for a long-running agent: what do you store, where, and how do you retrieve it? (Anthropic)
+
+**Strong answer.** I separate three kinds of memory by lifetime. Working memory is the current thread's messages and tool results; it lives in the checkpoint keyed by thread id and gets compacted when it approaches the budget, preserving decisions and open issues rather than raw transcript. Episodic memory is what happened in past threads: outcomes, user corrections, things that failed; it goes in a store namespaced by user or assistant id and is retrieved by semantic search plus recency. Semantic memory is durable facts and preferences, which I keep as small structured notes, an AGENTS.md-style file or a store document, because a fact that matters should be read every session rather than hoped for from a similarity search. Retrieval is just-in-time: the agent gets lightweight identifiers and pulls detail when it needs it, instead of front-loading everything. The tradeoff is that written memory is a prompt-injection surface and a drift surface: a wrong note poisons every later session, so writes need provenance, a TTL or review path, and an eval that checks the agent does not relitigate settled decisions. In LangGraph this is checkpointer for the thread, Store for cross-thread, and the design question is the namespace and what is allowed to write.
+
+**Weak answer sounds like:** "Put the conversation in a vector database and retrieve relevant chunks."
+
+**Study:** 08, 34
+
+### How does an agent decide when to call a tool versus answer from its own knowledge?
+
+**Strong answer.** It does not decide in any principled sense; it produces the next tokens, and the tool-call tokens are more likely when the prompt, the tool descriptions, and the training make them so. That means the decision is mine to shape. I shape it in three places: the system prompt states when tools are mandatory, for example "any statement about an account balance must come from a tool result"; the tool description says what the tool is for and, just as importantly, what it is not for; and the eval measures both over-calling and under-calling on real cases. For facts that can be stale, wrong, or consequential, I remove the choice entirely: a routing step forces retrieval, or the tool is the only path to the answer. The failure mode is asymmetric: an unneeded tool call costs latency and a little money; an answer from parametric memory about a customer's invoice costs trust. OpenAI's prompting guidance calls the knob "agentic eagerness" and tunes it with explicit tool-call budgets and stop conditions, which is the same idea from the other side.
+
+**Weak answer sounds like:** "The model knows when it needs more information."
+
+**Study:** 05, 40, 02
+
+### What makes an agent loop terminate correctly? How do you bound cost and steps?
+
+**Strong answer.** A loop terminates correctly when there is an explicit stop condition the software checks, not just a model that eventually stops emitting tool calls. I bound four things: steps, with a max-iteration count that fails loudly rather than truncating quietly; tokens and dollars, with a per-run budget the loop checks before each model call; wall-clock time, with a deadline; and repetition, by detecting the same tool call with the same arguments twice in a row, which is the most common infinite loop in practice. Termination also needs a definition of done that the model can verify: OpenAI's guidance for agentic work says to define what counts as done and how the model should verify it, and Anthropic's harness writeups make the same point with pass/fail feature lists. The tradeoff is that tight budgets cause premature exits on legitimately long tasks, so the exit should be a structured "budget exhausted, here is progress and what remains" rather than a crash, which also lets a human resume. In LangGraph the safety net is `recursion_limit`, and I set it deliberately rather than relying on the default.
+
+**Weak answer sounds like:** "Set a max iterations of ten."
+
+**Study:** 11, 16
+
+### How do you make an agent's actions reversible, or at least auditable, in a production system? (Palantir)
+
+**Strong answer.** Reversibility starts with classifying actions: reads are free, reversible writes like creating a draft or a ticket get logged, and irreversible writes like sending money or emailing a customer get gated. For the reversible class I prefer a two-phase design: the agent proposes, the software commits, and the commit records enough to undo, an idempotency key, the prior state, and the actor. For the irreversible class I add a human approval or a delay window, and I make the action happen through a narrow tool that only does that one thing. Auditability is an append-only event log, per run, of every model input, tool call, tool result, and approval, keyed by trace id and thread id; that log is what lets you answer "why did it refund this" a week later. The failure mode is that the model's narrated reasoning is not a faithful record, so I audit actions and inputs, not explanations. The 2026 pattern in managed-agent designs is exactly this: a durable session log, a stateless loop, and credentials that never enter the sandbox, so the audit trail and the blast radius are both controlled by the harness.
+
+**Weak answer sounds like:** "Log everything and add an undo button."
+
+**Study:** 36, 13, 39, 32
+
+### Design human-in-the-loop approval for an agent that takes consequential actions. (OpenAI, Palantir)
+
+**Strong answer.** The mechanism is a pause point in the graph before the consequential tool executes: the run is checkpointed, an approval request with the exact proposed arguments goes to a human channel, and the run resumes with the decision. The decision space is more than yes or no: approve, edit the arguments, reject with a reason the model sees, or respond with new information. Because the process may restart between pause and resume, the pause has to be durable, which means a checkpointer and a thread id, and because the node re-runs from the top on resume, anything before the pause must be idempotent. Which actions need approval is a policy, not a prompt: a rules layer maps tool plus argument thresholds to required approval, so a refund under fifty dollars is automatic and above it is not, and the model cannot talk its way past it. The failure modes are approval fatigue, where humans rubber-stamp everything because you gated too much, and stale approvals, where the world changed between request and decision, so I show the human the current state and expire requests. In LangGraph this is `interrupt()` inside the node and `Command(resume=...)` to continue; Deep Agents and LangChain's HITL middleware wrap that with `interrupt_on` per tool.
+
+**Weak answer sounds like:** "Ask the user to confirm before doing anything dangerous."
+
+**Study:** 13, 36
+
+### Your agent drifts after a long run and confidently works on the wrong thing. Diagnose it. (Cognition)
+
+**Strong answer.** I start with the trace, not the prompt. I find the last step where the agent was still on task and diff the context before and after: usually the original goal has scrolled out of the effective window, been compacted into a lossy summary, or been outweighed by a huge tool result. The three usual causes are context rot, where a long transcript degrades attention to the instruction; a bad compaction that dropped the constraint but kept the chatter; and an observation that redefined the task, often a document or error message the model treated as an instruction. The fixes match the causes: restate the goal and acceptance criteria in a structured note the agent re-reads every step; compact by preserving decisions and open issues, not by summarizing the transcript; cap tool results and offload large ones to a file with a preview; and add a check step that compares progress to the original contract. Anthropic's harness guidance goes further and says fresh context resets with a handoff artifact beat compaction for long tasks. The confirming test is an eval with long trajectories that scores goal adherence at every step, so drift shows up as a curve, not a complaint.
+
+**Weak answer sounds like:** "Add a reminder to the system prompt to stay on task."
+
+**Study:** 34, 43, 11, 28
+
+## RAG and Retrieval
+
+### What chunking strategy would you use for a large technical documentation corpus, and why? (Glean)
+
+**Strong answer.** Structure-aware first: technical docs already have headings, code blocks, and tables, so I split along those boundaries with a recursive splitter that respects them, rather than fixed windows that cut a code sample in half. Then I keep chunks small for retrieval and return something bigger for generation, the parent-child pattern, so the embedding is precise and the model sees enough context. I attach metadata to every chunk: the heading path, the product version, and the source URL, because "which version is this" is the first question a user of technical docs asks. Where budget allows I add contextual retrieval: a fifty to one-hundred token LLM-written preamble per chunk that states what the chunk is about within its document; Anthropic reported the top-20 retrieval failure rate dropping from 5.7 to 3.7 percent with contextual embeddings and to 1.9 percent combined with contextual BM25 and reranking. The tradeoff is indexing cost and complexity against retrieval recall, and the failure mode is that whatever you choose, you have to measure it: recall@k on a labelled question set, re-run when you change chunking, because chunking changes are silent regressions.
+
+**Weak answer sounds like:** "Five hundred tokens with fifty overlap."
+
+**Study:** 14, 29
+
+### How do you choose between a sparse retriever (BM25) and a dense retriever? When do you need both? (Microsoft, Perplexity, Glean)
+
+**Strong answer.** BM25 scores exact term overlap with two knobs: k1 saturates term frequency and b normalizes for document length, and IDF makes rare tokens count. It is unbeatable on identifiers, error codes, part numbers, and anything the embedding model never saw. Dense retrieval embeds meaning, so it handles paraphrase and vocabulary mismatch, and fails on exactly the rare tokens BM25 loves, because they get averaged into a vector. In a corpus with both natural language and identifiers, which is every enterprise corpus, I need both, and I fuse them with reciprocal rank fusion, summing 1 over k plus rank with k around 60, because it needs no score normalization across two incomparable scales. The tradeoff is two indexes to keep fresh and a fusion step to tune; the payoff is that hybrid is the single most reliable retrieval improvement I know of. I pick by running the eval: if recall@10 on identifier-heavy queries is bad, sparse is missing; if paraphrased queries fail, dense is missing.
+
+**Weak answer sounds like:** "Dense is better because it understands meaning."
+
+**Study:** 45, 14, 29
+
+### What is a reranker, when should you use one, and what does a cross-encoder cost you? (Cohere, Microsoft, Perplexity)
+
+**Strong answer.** A first-stage retriever, dense or sparse, scores query and document independently, which is what makes it fast enough to search millions. A cross-encoder reranker reads the query and a candidate passage together in one forward pass and produces a relevance score that sees the interaction between them, which is much more accurate. The cost is one model pass per candidate, so you never run it over the corpus; you run it over the top fifty to two hundred from the first stage. That adds tens to a few hundred milliseconds and a real per-query cost, and it is a hard dependency on another model. You use it when precision at the top matters more than latency: when the top five go into a generation prompt and a wrong one causes a hallucinated answer, or when the first stage is hybrid and the fused list needs a single consistent ordering. ColBERT-style late interaction sits in the middle, and LLM listwise rerankers are stronger and more expensive still. The failure mode is reranking a candidate set that never contained the answer, so I measure recall@100 before reranking and precision@5 after, separately.
+
+**Weak answer sounds like:** "A reranker makes the results better."
+
+**Study:** 45, 29
+
+### How would you evaluate the quality of a RAG pipeline: retrieval and generation separately? (Cohere)
+
+**Strong answer.** Retrieval gets its own labelled set: questions with the ids of the passages that answer them, and I report recall@k, MRR, and nDCG@k, because those tell me whether the answer was in the context at all. Generation is scored conditional on the retrieved context: faithfulness, does every claim trace to a passage; answer relevance, did it address the question; and correctness against a reference where I have one. Splitting them is the whole point: a wrong answer with recall@10 of 0.95 is a generation problem, and a wrong answer with the passage missing is a retrieval problem, and the fixes are completely different. Labelled retrieval sets are cheap relative to labelled answers because a domain expert can mark which passage is relevant much faster than writing a gold answer, and synthetic questions generated from passages bootstrap the set. The failure mode is evaluating end to end only, which lets a better generator mask a decaying index until the day it cannot.
+
+**Weak answer sounds like:** "Use RAGAS," with no ability to say what it measures.
+
+**Study:** 45, 19, 22, 29
+
+### What is HyDE and when does it outperform standard dense retrieval?
+
+**Strong answer.** HyDE, hypothetical document embeddings, asks the model to write a plausible answer to the query first, embeds that hypothetical passage, and searches with it instead of the raw question. It works because queries and passages live in different regions of embedding space, a short question versus a dense paragraph, and a hypothetical passage lands closer to real passages. It outperforms plain dense retrieval when queries are short or underspecified and the corpus is well covered by the model's general knowledge, so the hypothetical is roughly right in vocabulary even if wrong in facts. It fails when the model knows nothing about the domain, because then the hypothetical is confidently wrong in vocabulary too and drags retrieval toward its hallucination; it also costs a generation call before every search. So I use it for exploratory questions over public-ish domains and not for private corpora with unusual terminology, and I treat it as one of several query transforms, alongside multi-query and step-back, chosen per query type and validated on the retrieval eval.
+
+**Weak answer sounds like:** "HyDE generates a fake answer and searches with it, it's always better."
+
+**Study:** 29, 21
+
+### How does agentic RAG differ from standard RAG, and when is the extra complexity justified?
+
+**Strong answer.** Standard RAG is a fixed pipeline: retrieve once, stuff the context, generate. Agentic RAG makes retrieval a tool the model can call repeatedly: it can rewrite the query, decompose it, retrieve, judge whether the results are sufficient, and retrieve again, which is the interleaved-retrieval pattern from IRCoT and the self-reflection idea from Self-RAG. That helps on multi-hop questions where the second retrieval depends on the first answer, on ambiguous queries that need clarification, and on corpora spread across several sources where the right source is not known up front. The cost is latency, tokens, and a harder-to-debug trajectory, and the failure mode is the agent retrieving in circles or declaring victory on bad results. The complexity is justified when a single retrieval demonstrably fails the eval on a meaningful slice, typically multi-hop or cross-source questions, and not otherwise; Anthropic's advice to use the simplest architecture that works applies directly. When I do it, I gate the loop on a confidence check and a retrieval budget, and I evaluate trajectories, not just final answers.
+
+**Weak answer sounds like:** "Agentic RAG uses an agent so it's smarter."
+
+**Study:** 14, 29, 21
+
+### What causes semantic drift in embedding search and how do you detect it? (Cohere)
+
+**Strong answer.** Semantic drift is when the geometry of your index stops matching the geometry of your queries. The mechanical causes are mixing embedding-model versions in one index, which is never acceptable because the spaces are not comparable; changing the query or passage prefixes the model was trained with; a corpus whose vocabulary shifts over time, new product names and acronyms the embedding model maps poorly; and query distributions that shift away from the training data, for example users starting to paste error logs into a search built for questions. I detect it by monitoring, per week, the distribution of top-1 similarity scores and the fraction of queries with no result above a threshold; a slow decline is drift. I also keep a fixed labelled retrieval set and re-run recall@k on a schedule, and I log the embedding-model version on every vector. The fix is a re-embed with a new model into a new index, cut over atomically, never in place. The tradeoff is that re-embedding ten million chunks is a real bill, so detection has to be good enough to justify it.
+
+**Weak answer sounds like:** "Embeddings drift over time so you re-embed periodically."
+
+**Study:** 25, 29
+
+### Design permission-aware retrieval: users must never see content they can't access in the source system. (Microsoft, Databricks, Glean, Palantir)
+
+**Strong answer.** The rule is that the model never enforces access; the retrieval layer does, before anything enters the context. I store ACL principals as metadata on every chunk, synced from the source system on change events, and I apply the user's principals as a filter at query time, so unauthorized chunks are never candidates. Then I re-check at result time against the live source, because ACL syncs lag, and I over-fetch so late-binding rejections do not leave me with three results out of ten. For hard multi-tenant isolation I use separate namespaces or indexes per tenant rather than a filter, because a filter bug is a data breach and a namespace bug is an empty result. The subtle failure modes are existence leaks, where a count or a "no results in the document you can't see" reveals something, and very selective filters that fragment the HNSW graph and degrade recall, which some vendors handle with filter-aware indexing and some by falling back to brute force. And I test it as a security control, with an eval that issues queries as low-privilege users against known restricted documents and asserts zero leaks, on every deploy.
+
+**Weak answer sounds like:** "Add the user's permissions to the prompt so the model knows what it can show."
+
+**Study:** 46, 45, 29, 39
+
+### Compare HNSW, IVF-PQ and flat indexes. How do you pick, and what does recall@k cost in latency?
+
+**Strong answer.** Flat is exact brute-force search: perfect recall, linear time, fine up to a few hundred thousand vectors or as the refine step for others. HNSW is a multi-layer proximity graph: you descend greedily from a sparse top layer and do a beam search of width efSearch at the bottom; M, the degree, controls recall and memory, efConstruction controls build quality, and efSearch is the query-time knob that trades recall for latency. Its cost is memory, roughly 4d plus 8M bytes per vector, so 768 dimensions at M 16 is about 3.2 KB a vector and a hundred million vectors is over 300 GB of RAM, and deletes are tombstones that degrade the graph. IVF-PQ clusters vectors into cells, probes nprobe of them, and compresses each vector to m bytes with product quantization, so 768 dimensions at m 64 is 64 bytes versus 3,072, a 48x reduction; it needs training, misses at cluster boundaries, and loses precision you recover with a re-rank on exact vectors. I pick HNSW for under a hundred million vectors when RAM allows and latency matters, IVF-PQ or a disk-based index at billion scale on limited memory, and flat for small or as a refine stage. Recall costs latency along a curve: raising efSearch or nprobe buys recall roughly linearly in time, and the right point is set by the eval, not the default.
+
+**Weak answer sounds like:** "HNSW is the fast one, use that."
+
+**Study:** 45, 29, 25
+
+### How do you handle tables, figures and multi-column PDFs in a retrieval pipeline?
+
+**Strong answer.** The mistake is treating a PDF as a text stream, because multi-column layouts interleave columns line by line and tables lose their structure entirely. I run layout-aware parsing first, a document-understanding model or a layout parser that segments the page into blocks with types: paragraph, table, figure, caption, header. Tables get serialized to a structured form, markdown or row-wise JSON with headers repeated, and I embed a natural-language description of the table alongside the structured form, because "quarterly revenue by region" retrieves better than a wall of numbers. Figures get a caption plus a model-written description, and if the figure carries data I extract it. Each block keeps its page number and bounding box so citations can point to the exact spot. The tradeoff is indexing cost, which is orders of magnitude above text splitting, and the failure mode is silently mis-parsed tables producing confident wrong numbers, so I sample parsed pages into a human review queue and I measure retrieval on table-heavy questions separately from prose questions.
+
+**Weak answer sounds like:** "Use a PDF-to-text library and chunk the output."
+
+**Study:** 14, 29
+
+### How do you keep an index fresh when the underlying corpus changes continuously? (Perplexity, Cursor)
+
+**Strong answer.** First I define a freshness SLO, because "fresh" without a number is not a requirement: for a code assistant it might be seconds after a commit, for a policy corpus it might be an hour. Then I treat indexing as a change-data-capture problem: source systems emit change events, a worker computes a content hash per document, and only changed chunks are re-embedded and upserted, so the cost scales with churn, not corpus size. Every vector carries the document version, the content hash, and the embedding-model version, so I can detect stale entries and never mix models. HNSW does not delete cleanly; deletes are tombstones that degrade recall over time, so I schedule compaction or periodic rebuilds into a fresh index and cut over. For IVF, centroid drift as the corpus changes means periodic retraining. The tradeoff is streaming upserts against batch efficiency and index quality, and the failure mode is a stale chunk answering a question the new document changed, which is why I keep a small canary set of recently changed documents and query them continuously.
+
+**Weak answer sounds like:** "Re-index nightly."
+
+**Study:** 29, 45
+
+### How do you attribute every claim in a generated answer to a specific retrieved span? (Perplexity, Harvey, Abridge)
+
+**Strong answer.** I make citation part of the output contract, not a post-hoc hope. Every retrieved chunk gets a short id, the prompt instructs the model to cite by id after each sentence, and structured output enforces that each claim carries at least one id. Then I verify: for each cited sentence I check the cited span actually supports it, either by string overlap for extractive claims or by an NLI-style faithfulness check for paraphrased ones, and I drop or flag sentences that fail. That gives me two metrics, citation precision, the fraction of citations that support their claim, and citation recall, the fraction of claims with a supporting citation, which I track in production. Span-level attribution needs span-level offsets in the index, so chunks store character or token offsets into the source and the UI can highlight. The failure modes are the model citing the right document for the wrong reason, which only the verification step catches, and citations that exist but nobody clicks, which is why in regulated domains the verified citation is the product, not a decoration.
+
+**Weak answer sounds like:** "Ask the model to include sources."
+
+**Study:** 29, 26, 24
+
+## Evaluation and Observability
+
+### Design an LLM-as-judge evaluation. What are its known biases and how do you correct for them? (Perplexity)
+
+**Strong answer.** A judge is a model prompted with a rubric that scores an output, either absolutely or by comparing two candidates. Its known biases are position bias, preferring whichever answer appears first; verbosity bias, preferring longer answers; self-preference, rating its own model family higher; and a tendency to reward confident tone over correctness. I correct them structurally: for pairwise comparison I run both orderings and only count consistent verdicts; I write rubrics with specific, gradable criteria rather than "which is better"; I use a different model family for judging than for generation where I can; and I anchor the judge with a few labelled examples. Most importantly I calibrate the judge against humans: a few hundred human-labelled items, and I report the judge's agreement with them, because a judge you have not calibrated is a random number generator with good grammar. The tradeoff is that calibration is exactly the expensive human labelling the judge was meant to avoid, so the judge earns its keep by scaling a small labelled set, not replacing it. And I re-calibrate when the generator changes, because judge biases interact with the thing being judged.
+
+**Weak answer sounds like:** "Use GPT to score the answers from one to ten."
+
+**Study:** 19, 22
+
+### How do you build an eval set when there is no labelled ground truth and experts are expensive? (Cohere, Harvey)
+
+**Strong answer.** I use experts for the highest-leverage thing, which is judging, not authoring. First I mine production: real queries, clustered by embedding, sampled per cluster so the set covers the distribution rather than the easy cases. Second I generate synthetic items from the corpus, questions whose answer is a known passage, which gives me retrieval labels for free and answer labels I can trust because they were derived from the source. Third I use pairwise preference instead of absolute grading, because an expert can say "A is better than B" in a fraction of the time it takes to write a gold answer, and pairwise labels are enough to calibrate a judge. Fourth I harvest implicit labels, user corrections, thumbs, escalations, and reruns, as weak signals. The tradeoff is that synthetic sets overfit to the corpus's phrasing and miss the questions users actually struggle with, so I keep the production sample as the anchor and treat synthetic as coverage. And I version the set, because an eval set that changes every week cannot show a regression.
+
+**Weak answer sounds like:** "Have the model generate questions and answers and use those."
+
+**Study:** 22, 19
+
+### How do you detect and measure hallucinations in a production RAG system? (Anthropic, OpenAI, Cursor)
+
+**Strong answer.** I define hallucination in RAG precisely as a claim not supported by the retrieved context, which turns it into a faithfulness check I can automate. Offline, I run a faithfulness judge over a labelled set and report the unsupported-claim rate, and I keep a separate metric for retrieval failures, because a hallucination caused by an empty context is a retrieval bug. Online, I sample a percentage of production responses and run the same check asynchronously, sliced by query type and by which retriever fired, so a regression in one slice is visible. I also instrument the structural signals: answers with no citations, answers whose cited spans do not overlap the claim, refusal rate dropping suddenly, and answer length spiking, because all of those precede a hallucination spike in practice. The tradeoff is that the judge is itself a model with a false-negative rate, so I calibrate it against human labels and report its agreement alongside the metric. And the fix is upstream: better retrieval, a "say you don't know" path with an eval that rewards it, and forced citation, not a prompt that says "do not hallucinate."
+
+**Weak answer sounds like:** "Tell the model to only use the context and check the outputs manually."
+
+**Study:** 22, 29, 26
+
+### Design the regression gate that decides whether a prompt or model change ships. (Anthropic)
+
+**Strong answer.** The gate is a fixed, versioned eval suite run on every change, with thresholds per metric and a statistical test, not a single number eyeballed in a spreadsheet. The suite has tiers: a fast deterministic layer of unit-style checks, schema validity, tool-call correctness on scripted cases, and safety refusals, that must be perfect; a judged layer of task quality on a few hundred items with a calibrated judge; and a slow layer of end-to-end trajectories on the hardest cases. Because model outputs are stochastic, I run each item several times and compare distributions with confidence intervals; a change ships only if it is not worse than baseline on any tier by more than a tolerance, and if it claims to be better, the improvement has to be significant, not noise. I also gate on cost and latency, because a prompt that improves quality by one point and doubles tokens is a regression. The failure modes are an eval set that the prompt was tuned against, which is contamination by another name, so I hold out a set the author never sees; and a gate so slow nobody runs it, so the fast tier runs in minutes. LangSmith or any experiment tracker holds the baselines; the gate logic is mine.
+
+**Weak answer sounds like:** "Run the evals and ship if the score goes up."
+
+**Study:** 22, 37
+
+### Why do benchmark scores improve while users say the system got worse? Enumerate the reasons. (Cognition)
+
+**Strong answer.** There are at least seven. One, the benchmark measures the wrong thing: single-turn accuracy while users experience multi-turn sessions. Two, distribution shift: the benchmark froze last quarter's queries and users moved on. Three, contamination: the prompt or model was tuned against the benchmark, so the score is memorization. Four, the judge is biased toward the new output style, longer or more confident, which users experience as slower and preachier. Five, aggregate versus slice: the mean improved because the easy majority got better while the power users' hard slice regressed. Six, latency and cost are not in the benchmark, and users feel every extra second. Seven, the change altered behavior users had built habits around, so it is worse for them even if it is objectively better. The diagnosis is always the same: slice the online feedback by user segment and query type, compare to the offline set, and find where the benchmark distribution and the user distribution disagree. The fix is to make the online signal part of the gate, which is what online evaluation is for.
+
+**Weak answer sounds like:** "Users are just noticing different things than the benchmark."
+
+**Study:** 22, 37, 19
+
+### What is benchmark contamination and how do you guard against it? (Zhipu AI, Alibaba, Scale AI)
+
+**Strong answer.** Contamination is when the thing you are measuring has already seen the test, so the score measures memory, not capability. For a base model it is the benchmark items appearing in the pretraining corpus; for an application it is the prompt or few-shot examples having been tuned against the eval set, which is the everyday version most teams commit without noticing. I guard against it in layers: hold-out sets the prompt author never sees, refreshed periodically from new production data; canary items, unique strings whose reproduction proves leakage; n-gram and embedding overlap checks between training or prompt material and test items; and, for base models, preferring benchmarks with post-cutoff or dynamically generated items. For agents, private tasks with hidden verifiers are the strongest guard, because there is nothing public to memorize. The tradeoff is cost and the fact that a truly private set cannot be shared for reproducibility. The tell is a score that jumps without a mechanism you can explain, and the confirming test is a fresh set from the same distribution that does not jump.
+
+**Weak answer sounds like:** "Contamination is when the model was trained on the test set; use a newer benchmark."
+
+**Study:** 22, 30
+
+### What observability does a production LLM system need: traces, spans, costs, feedback?
+
+**Strong answer.** A trace per request, with a span per model call, tool call, retrieval, and guardrail, carrying the exact inputs and outputs, token counts, latency, model and prompt version, and a thread id that links turns of a conversation; that is the minimum to answer "why did it do that." On top of the trace I attribute cost per span so I can roll up dollars by feature, tenant, and prompt version, and I record cache hits, because prompt caching changes the cost picture materially. Feedback attaches to the trace: explicit thumbs and corrections, implicit signals like retries and escalations, and the judge scores from online evaluation, all keyed to the same trace id so I can go from a bad rating to the exact span that caused it. Then I aggregate into dashboards by slice and alert on the things that predict incidents: error rate per tool, p95 time to first token, refusal rate, unsupported-claim rate, and cost per successful task. The tradeoff is that full-payload logging is a privacy and storage problem, so redaction and sampling policies are part of the design, and the failure mode is logging everything and looking at nothing, so every metric on the dashboard needs an owner and a threshold. OpenTelemetry-shaped spans keep me portable across LangSmith or any other backend.
+
+**Weak answer sounds like:** "Log the prompts and responses."
+
+**Study:** 32, 19
+
+### How do you manage prompt versioning and rollbacks in production?
+
+**Strong answer.** A prompt is code: it lives in version control, has a content hash, goes through review, and its version is recorded on every trace, so I can always say which prompt produced which output. Deployment is decoupled from the code deploy through a prompt registry or a feature-flag system, so a rollback is a config change that takes seconds, not a redeploy. Every version has to pass the regression gate before it can be promoted, and promotion is staged: canary to one percent, compare online metrics against the current version, then ramp. The subtle part is that a prompt is coupled to a model version and a tool set, so the versioned unit is really the triple, and rolling back a prompt under a new model may not restore the old behavior. Failure modes are prompts edited in a dashboard with no history, and prompt strings assembled at runtime from fragments so no single version exists; both make rollback impossible. I also keep the eval results attached to the version, so "what did this version score" is a lookup, not an archaeology project.
+
+**Weak answer sounds like:** "Keep the prompts in a config file and use git."
+
+**Study:** 22, 30, 32
+
+### Design online evaluation: what do you log, what do you sample, and what do you A/B? (Perplexity)
+
+**Strong answer.** I log everything at the trace level: inputs, outputs, retrieved context, tool calls, versions, latency, and cost, with redaction. I sample for judging, because running a judge on every response doubles my model bill: a base rate of a few percent uniformly, boosted to a hundred percent for high-risk slices like new users, new prompt versions, and anything that triggered a guardrail. Judges run asynchronously and write scores back to the trace. Explicit feedback is collected sparingly, one lightweight signal per response, and I weight implicit signals more: regenerations, edits to the model's output, follow-up questions that repeat the first, and escalations to a human. A/B tests are for changes where the offline gate says "not worse" and I want to know "actually better": randomize by user, not by request, so conversations are consistent; pick a primary metric tied to task success, like resolved-without-escalation, not thumbs; and run long enough for a significance test with the effect size I care about. The failure modes are A/B tests on vanity metrics, peeking early, and judging with a judge that was calibrated on the old distribution.
+
+**Weak answer sounds like:** "Add a thumbs up, thumbs down and watch the ratio."
+
+**Study:** 19, 37, 32
+
+### How would you evaluate an agent, as opposed to a single model response? (Moonshot AI, Zhipu AI, Scale AI, Cognition)
+
+**Strong answer.** An agent produces a trajectory, not a response, so I evaluate the trajectory at three levels. Outcome: did the task get done, verified by a checker that looks at the world state, a database row, a passing test, a sent message in a sandbox, not at the model's claim that it finished. Process: did it take a reasonable path, measured by tool-call correctness against expected calls, step count, wasted calls, and policy violations like touching a tool it should not have. Efficiency: tokens, dollars, and wall-clock per successful task. Because trajectories are stochastic and long, I run each task several times and report pass@k and pass^k, the probability that all k runs succeed, which is what a user experiences; a 70 percent single-run success rate is a 34 percent three-in-a-row rate. Tasks live in sandboxed environments with hidden verifiers so the agent cannot game them, and I include adversarial cases, injected instructions in tool results, to score robustness. The failure mode is judging the transcript, because the reasoning text is not a faithful record of why it acted; verify outcomes. The statistics matter: confidence intervals over runs, not a single number.
+
+**Weak answer sounds like:** "Check whether the final answer is correct."
+
+**Study:** 37, 22
+
+## LLM Internals and Architecture
+
+### Explain scaled dot-product attention and why the 1/sqrt(d_k) scaling factor matters.
+
+**Strong answer.** Attention computes softmax of Q K transposed over the square root of d_k, times V. Each query dot-products against every key to get a relevance score, softmax turns the scores into weights, and the output is the weighted sum of values. The scaling matters because a dot product of two d_k-dimensional vectors with unit-variance components has variance d_k, so without scaling the logits grow with head dimension, softmax saturates toward one-hot, and the gradients through it vanish; dividing by root d_k restores unit variance. The causal mask sets future positions to negative infinity before softmax, which is what makes the KV cache valid, because past keys and values never depend on future tokens. The cost is quadratic in sequence length in time and, naively, in memory per head, which is the number every serving question comes back to. The engineering answer to that quadratic memory is FlashAttention, which computes the same result without materializing the n-by-n matrix.
+
+**Weak answer sounds like:** "Attention lets the model focus on relevant tokens, and the scaling normalizes the values."
+
+**Study:** 43, F
+
+### What is the KV cache, and what are its memory implications at scale? Derive the formula. (OpenAI, xAI, Mistral AI, Amazon, Apple, NVIDIA, Together AI, Character.AI)
+
+**Strong answer.** During decoding each new token attends to every previous token's key and value in every layer, and because of the causal mask those keys and values never change, so we cache them instead of recomputing them. Per token the cache stores a key and a value, so a factor of two, for every layer, for every KV head, each of head_dim elements, at the precision's byte width: bytes per token equals 2 times n_layers times n_kv_heads times head_dim times bytes. Llama-3-70B has 80 layers, 8 KV heads under GQA, head_dim 128; in FP16 that is 2 times 80 times 8 times 128 times 2, which is 327,680 bytes, 320 KiB per token. An 8K context is 2.5 GiB per sequence and a batch of 32 is 80 GiB, one full H100 just for cache; with full multi-head attention at 64 KV heads it would be eight times larger, which is exactly why GQA exists. We cache K and V but not Q because the query is only needed for the current token. The implications are that memory, not compute, bounds batch size and therefore throughput, that the cache fragments without paging, and that FP8 KV or MLA-style compression are direct throughput levers.
+
+**Weak answer sounds like:** "The KV cache stores previous tokens so you don't recompute them, and it uses a lot of memory."
+
+**Study:** 43, 38, F
+
+### What are MQA and GQA, and what do they trade away? (Meta, Mistral AI)
+
+**Strong answer.** In standard multi-head attention every query head has its own key and value heads, so the KV cache scales with the number of heads. Multi-query attention shares a single key and value head across all query heads, which cuts the cache by the head count, 64x for a 64-head model, but loses quality because all heads attend over the same projection. Grouped-query attention is the middle: g KV heads, each shared by a group of query heads; Llama-3-70B uses 8 KV heads for 64 query heads, an 8x cache reduction at close to MHA quality. What they trade away is representational capacity in the key and value space and, for MQA especially, measurable quality on some tasks; what they buy is memory bandwidth, because decode is bandwidth-bound and reading less cache per step is directly faster, and larger batches for the same memory. The GQA paper showed you can uptrain an existing MHA checkpoint to GQA with about five percent of pretraining compute, which is why it spread so fast. The interview follow-up is usually MLA, which compresses what is stored instead of sharing heads.
+
+**Weak answer sounds like:** "They use fewer heads to save memory."
+
+**Study:** 43, 38
+
+### What is Multi-head Latent Attention (MLA) and why did DeepSeek introduce it? (DeepSeek, Moonshot AI)
+
+**Strong answer.** MLA, from DeepSeek-V2, compresses keys and values into a low-rank latent vector per token and caches that latent instead of the full K and V; at attention time the latent is up-projected back into per-head keys and values. GQA reduces cache by sharing heads, MLA reduces it by compressing what is stored, and the reported cache is on the order of 4 to 14 percent of full multi-head attention while keeping per-head expressiveness that MQA gives up. DeepSeek introduced it because for a very large MoE model serving long contexts, KV cache, not weights, was the binding constraint on batch size and therefore cost per token, and they wanted MHA-level quality at MQA-level memory. The tradeoff is extra compute for the up-projection, complexity in how rotary position embeddings interact with the compressed dimensions, which they handle with a separate decoupled RoPE component, and the fact that it has to be trained in from the start rather than retrofitted cheaply like GQA. From a serving standpoint it is the same lever as GQA pushed further: smaller cache, bigger batches, cheaper decode.
+
+**Weak answer sounds like:** "MLA is DeepSeek's more efficient attention."
+
+**Study:** 43, 38
+
+### Explain FlashAttention. It does not reduce FLOPs, so why is it faster? (Together AI)
+
+**Strong answer.** Naive attention materializes the n-by-n score matrix in GPU high-bandwidth memory, writes it out, reads it back for softmax, writes again, reads again for the multiply with V. On modern GPUs the bottleneck is that memory traffic, not the arithmetic; an H100 can do roughly 300 floating-point operations for every byte it moves, so anything that moves bytes without doing that much math is bandwidth-bound. FlashAttention tiles Q, K, and V into blocks that fit in on-chip SRAM, computes the attention for each block, and uses an online softmax that keeps running maximums and sums so the final result is exactly equal to full softmax without ever writing the n-by-n matrix to HBM. Same FLOPs, a fraction of the memory traffic, and memory usage that is linear in sequence length instead of quadratic. FlashAttention-3 adds Hopper-specific asynchrony and FP8 and reaches around 75 percent utilization versus about 35 for the previous version. For an agent engineer this is why long contexts became affordable, and it pairs with PagedAttention, which solves the KV cache fragmentation problem on the serving side rather than the compute problem.
+
+**Weak answer sounds like:** "FlashAttention is an optimized kernel that makes attention faster."
+
+**Study:** 43, 38
+
+### How does Byte Pair Encoding work, and what are its failure modes (numbers, code, non-Latin scripts)? (Alibaba, Sarvam AI, Hugging Face)
+
+**Strong answer.** Byte-level BPE starts with the 256 byte values as the vocabulary and repeatedly merges the most frequent adjacent pair in the training corpus into a new token until it hits the vocabulary budget, 128K for Llama 3. Because it bottoms out at bytes there is never an out-of-vocabulary error, and frequent strings get single tokens while rare strings fragment. The failure modes follow from frequency. Numbers tokenize inconsistently, 1234 might be one token and 1235 two, so arithmetic sees an irregular representation, which is part of why models are bad at it. Code is full of whitespace and punctuation sequences that fragment or merge oddly, and indentation-sensitive languages suffer. Non-Latin scripts and lower-resource languages were rarer in the training corpus so they get fewer merges, meaning the same sentence costs two to four times the tokens of English, which means less effective context, higher cost, and worse quality per dollar for those users. For an engineer the practical consequences are that context budgets, KV cache, and bills are all measured in tokens, so token counts for your actual data, not word counts, are what you plan around.
+
+**Weak answer sounds like:** "BPE splits words into subwords so rare words can be handled."
+
+**Study:** 42, 16
+
+### What is positional encoding in transformers, and how has it evolved (sinusoidal, learned, RoPE, ALiBi)?
+
+**Strong answer.** Attention is permutation-invariant: without positional information the model cannot tell "dog bites man" from "man bites dog." Sinusoidal encodings in the original transformer added fixed sine and cosine waves of different frequencies to the input embeddings, which in principle allowed extrapolation but in practice did not generalize well. Learned absolute positions, as in GPT-2 and BERT, trained a vector per position, which works within the trained length and simply has no vector beyond it. RoPE, rotary position embedding, rotates each two-dimensional pair of the query and key vectors by an angle proportional to position, so the attention score depends only on the relative distance between tokens; it is applied inside attention rather than added to embeddings and is what Llama and most modern models use. ALiBi drops positional embeddings entirely and adds a linear penalty to attention scores proportional to distance, which extrapolates well but limits how the model can use far context. The evolution is from absolute to relative and from additive to multiplicative, driven by the need for long contexts, and the open problem is still extrapolating beyond the trained length, which is the next question.
+
+**Weak answer sounds like:** "Positional encoding tells the model where words are in the sentence."
+
+**Study:** 43, F
+
+### Explain RoPE and how position interpolation / YaRN extend context beyond the trained length. (Meta, Moonshot AI, Alibaba)
+
+**Strong answer.** RoPE splits the head dimension into pairs and rotates each pair of the query and key by an angle m times theta_i, where m is the position and theta_i equals base to the power minus 2i over d; the base is 10,000 classically and Llama 3 uses 500,000. Because rotation is applied to both q and k, the dot product depends only on the difference in positions, so it encodes relative position with no learned parameters. High-frequency pairs rotate fast and capture local order; low-frequency pairs rotate slowly and capture long range. It fails past the training length because the low-frequency dimensions see angles they never saw during training. Position interpolation fixes this by scaling positions down so a longer sequence fits inside the trained angle range, at the cost of blurring the high-frequency, local detail. NTK-aware scaling instead spreads the change across frequencies, and YaRN combines that with attention temperature scaling and a short fine-tune, getting much longer contexts for little compute. The tradeoff is that extended context is never free: retrieval quality at distance degrades, which is the lost-in-the-middle problem, so a model that accepts 128K tokens is not a model that uses 128K tokens equally.
+
+**Weak answer sounds like:** "RoPE rotates the embeddings, and you can scale it to get longer context."
+
+**Study:** 43, 34
+
+### What do the Chinchilla scaling laws say, and how do they differ from earlier scaling intuitions? (Anthropic)
+
+**Strong answer.** Chinchilla, from DeepMind in 2022, asked how to split a fixed compute budget between parameters and training tokens and found that the earlier intuition, from the Kaplan scaling laws and GPT-3, had over-weighted parameters: models were much larger than their data justified. The compute-optimal recipe is roughly 20 tokens per parameter, so a 70B model wants about 1.4 trillion tokens, and a 70B model trained that way beats a 280B model trained on less. The difference from earlier intuition is the exponent: Kaplan suggested scaling parameters faster than data; Chinchilla says scale them about equally. The practical twist since then is that compute-optimal for training is not compute-optimal for deployment: if you will serve a model billions of times, over-training a smaller model on far more than 20 tokens per parameter, as Llama 3 did with 15 trillion tokens on 8B and 70B models, saves inference cost that dwarfs the training overspend. For an engineer this is why small models kept getting better and why fine-tuning a small over-trained model often beats prompting a huge one on a narrow task.
+
+**Weak answer sounds like:** "Bigger models with more data are better."
+
+**Study:** F, 30
+
+### What is a mixture-of-experts architecture and how does it scale capacity without scaling FLOPs? (Mistral AI, Cohere, DeepSeek, Moonshot AI, Zhipu AI, Alibaba)
+
+**Strong answer.** In an MoE transformer the dense feed-forward block in each layer is replaced by N expert feed-forward networks and a small router that, for each token, picks the top-k experts and sends the token through only those. So the model holds all N experts' parameters, which is capacity, but each token touches only k of them, which is compute. Mixtral 8x7B has about 47 billion total parameters and 13 billion active per token with top-2 of 8; DeepSeek-V3 has 671 billion total and 37 billion active with 8 of 256 routed experts plus shared experts. The tradeoffs are real: all experts must be resident in memory, so you pay the memory and the memory bandwidth of the full model even though you compute a fraction; routing has to be load-balanced with auxiliary losses or the popular experts saturate and others starve; and across GPUs tokens must be exchanged all-to-all between the router and the experts, which is a network cost that dominates at scale. Serving-wise you need large batches so every expert has enough tokens per step to be efficient, which is why MoE favors high-throughput serving and is awkward for small deployments. The one-liner is "47B of knowledge for 13B of compute, but 47B of memory."
+
+**Weak answer sounds like:** "MoE has multiple expert models and a router picks the best one for the question."
+
+**Study:** 43, 38
+
+### Explain the difference between pre-training, supervised fine-tuning and preference optimisation. (Meta, Scale AI)
+
+**Strong answer.** Pre-training is next-token prediction over trillions of tokens of raw text; it builds the knowledge and the language ability and produces a model that completes documents but does not follow instructions. Supervised fine-tuning trains on curated prompt-response pairs, usually tens of thousands to a few million, and teaches the format and the behavior: answer the question, use the tool schema, refuse this, adopt this persona; it is imitation, so it is bounded by the quality of the demonstrations. Preference optimization trains on comparisons, this response is better than that one, either through RLHF with a learned reward model and PPO, or directly with DPO which skips the reward model, or with GRPO which drops the critic by normalizing rewards within a group of samples and is how DeepSeek-R1 trained reasoning with rule-based rewards. Preference methods can push beyond the demonstrations because they optimize for what humans or verifiers prefer, not for copying; the cost is reward hacking, where the model finds outputs the reward likes that humans do not, and the faithfulness problem, where models trained with outcome rewards exploit shortcuts and rarely verbalize it. For an application engineer the practical version is: SFT when you have good examples of the behavior, preference tuning when you can judge but not write, and prompting first, because most teams never need either.
+
+**Weak answer sounds like:** "Pre-training teaches language, fine-tuning teaches tasks, RLHF makes it aligned."
+
+**Study:** 30, 44, F
+
+### Compare greedy, beam search, top-k, top-p and temperature sampling. When does each fail? (Google DeepMind, Apple, Perplexity)
+
+**Strong answer.** Greedy takes the argmax token each step; it is deterministic and fast but gets stuck in repetitive loops and cannot recover from a locally good, globally bad choice. Beam search keeps the b highest-probability partial sequences; it is good for tasks with a nearly unique right answer like translation, and bad for open-ended text where it produces bland, high-likelihood, repetitive output because the most probable text is not the most human-like. Temperature divides the logits by T before softmax: below one sharpens toward greedy, above one flattens toward uniform, and too high produces incoherence. Top-k samples from the k most likely tokens, which fails when the distribution is flat, where k truncates good options, or peaked, where k includes junk. Top-p, nucleus sampling, samples from the smallest set whose cumulative probability exceeds p, which adapts to the distribution's shape and is the usual default; it still admits low-probability tail tokens on very flat distributions, which min-p tries to fix by scaling the threshold to the top token's probability. For agents the relevant failure is tool-call arguments: I run those at low temperature, and I remember that constrained decoding masks the logits before any of these apply, so sampling can never violate the schema.
+
+**Weak answer sounds like:** "Temperature controls creativity, and top-p is a more stable version of top-k."
+
+**Study:** 44, F
+
+### What is the lost-in-the-middle problem in long contexts and how do you address it? (Moonshot AI)
+
+**Strong answer.** The Liu et al. 2023 study showed that when the relevant passage is placed at different positions in a long context, accuracy follows a U shape: high at the start, high at the end, and markedly lower in the middle, even for models whose context window comfortably holds everything. The cause is a mix of training data, where important information tends to be at document boundaries, and attention dynamics that favor recent and initial positions. I address it in three ways. I retrieve fewer, better passages and rerank so the best ones sit first and last rather than stuffing the window; I put instructions and the question at the end after the context, where recency helps; and for very long inputs I chunk and summarize hierarchically instead of relying on a single pass. For agents the same effect is why a goal stated once at the top of a long transcript stops governing behavior, so the harness restates the goal and constraints near the end of the context each turn. The measurement is a needle-in-a-haystack style eval over positions on your own data, because the curve differs by model and by content type.
+
+**Weak answer sounds like:** "Long contexts are hard for models so you should use RAG."
+
+**Study:** 43, 34, 29
+
+### Why is LayerNorm placed pre-block in modern transformers, and what is RMSNorm?
+
+**Strong answer.** The original transformer used post-norm: attention or MLP, then add the residual, then normalize. That puts the normalization on the main residual path, so gradients at the bottom of a deep stack depend on a long chain of normalizations and training is unstable without careful warmup. Pre-norm moves the normalization to the input of each sub-block and leaves the residual stream untouched: x plus f of norm of x. The residual path is then an identity highway from input to output, gradients flow cleanly, deep models train without heroics, and this is what GPT-2 onward and every Llama uses. The cost is a slight tendency for the residual stream to grow in magnitude through depth, which is why the final norm before the output head matters. RMSNorm simplifies LayerNorm by dropping the mean subtraction and the bias, dividing by the root mean square of the activations times a learned scale; it is cheaper, has fewer parameters, and empirically works just as well, which is why Llama uses it. The block is: RMSNorm, attention, residual add, RMSNorm, SwiGLU MLP, residual add.
+
+**Weak answer sounds like:** "LayerNorm normalizes activations to stabilize training; RMSNorm is a faster version."
+
+**Study:** 42
+
+### Explain SwiGLU and why gated activations replaced ReLU/GELU in modern LLM MLP blocks. (Meta)
+
+**Strong answer.** A standard transformer MLP is two linear layers with a nonlinearity between them: up-project, ReLU or GELU, down-project. A gated linear unit replaces the single up-projection with two parallel projections, one passed through a nonlinearity and one left linear, multiplied elementwise, then down-projected. SwiGLU is that with Swish, x times sigmoid of beta x, as the nonlinearity. The gate lets the network learn, per dimension, how much of the signal to pass, a multiplicative interaction that a single activation cannot express, and Shazeer's 2020 paper showed consistent quality gains at equal compute. The cost is a third weight matrix, so to hold parameter count constant the hidden dimension is shrunk to about two-thirds of the usual four-times expansion, which is why Llama's intermediate size looks odd. It replaced ReLU and GELU because on the same parameter budget it trains to lower loss, and at pretraining scale a consistent small gain is worth a lot. PaLM, Llama, and most post-2022 models use it; the MoE variants apply the same gated MLP inside each expert.
+
+**Weak answer sounds like:** "SwiGLU is a smoother activation function that works better."
+
+**Study:** 42
+
+### Walk me through what happens, tensor by tensor, in one forward pass of a decoder-only transformer. (Anthropic)
+
+**Strong answer.** Input is a sequence of n token ids. The embedding lookup produces an n by d_model matrix; in Llama-3-70B d_model is 8192. That enters the first of 80 identical blocks. In each block, RMSNorm scales each row; three projections produce Q, K, and V; with GQA there are 64 query heads and 8 KV heads of head_dim 128, so Q is n by 64 by 128 and K and V are n by 8 by 128. RoPE rotates Q and K by position. For each head, scores are Q K transposed over root 128, an n by n matrix, masked causally, softmaxed, and multiplied by V to give n by 128; heads are concatenated to n by 8192 and passed through the output projection, then added back to the residual stream. A second RMSNorm feeds the SwiGLU MLP: two up-projections to the intermediate size, gated multiply, down-projection, residual add. After 80 blocks a final RMSNorm and the unembedding matrix map n by 8192 to n by vocabulary size, 128K logits per position. During training we take the loss on every position; during inference we take only the last row's logits, sample a token, append it, and, because K and V for every previous position are cached, the next pass processes one token: prefill is the big parallel pass over the prompt and decode is the one-row-at-a-time loop that is bandwidth-bound.
+
+**Weak answer sounds like:** "Tokens are embedded, go through attention and feed-forward layers, and the output is a probability over the next token."
+
+**Study:** 42, 43, 38
+
+## AI System Design
+
+### Design an enterprise RAG assistant over 10M documents with per-user permissions. (OpenAI, Microsoft, Amazon, Databricks, Scale AI)
+
+**Strong answer.** I split it into an ingestion plane and a query plane. Ingestion connects to each source, Notion, Confluence, SharePoint, tickets, through connectors that emit change events, runs layout-aware parsing, structure-aware chunking with contextual preambles, and writes chunks with metadata, ACL principals, document version, and embedding-model version, to a hybrid index: BM25 plus a dense index, HNSW if RAM allows, otherwise IVF-PQ with a re-rank stage. Ten million documents is on the order of a hundred million chunks, so I size memory from the per-vector cost and expect to shard. The query plane resolves the user's principals, runs hybrid retrieval with ACL filters applied at candidate time, fuses with RRF, reranks the top hundred with a cross-encoder, re-checks permissions against the live source, and generates with forced citations under a faithfulness check. Security is enforced by the retrieval layer, never by the model, with per-tenant namespaces for hard isolation and a leak eval on every deploy. Observability traces every query with retrieved ids and versions, and I run offline retrieval and faithfulness evals plus online sampled judging. The hard tradeoffs I would call out: freshness SLO versus indexing cost, reranking latency versus answer quality, and ACL sync lag versus over-fetch. The first thing I would build is the retrieval eval set, because everything else is tuned against it.
+
+**Weak answer sounds like:** "Chunk the documents, embed them into a vector database, retrieve the top five, and send them to the LLM with the user's permissions in the prompt."
+
+**Study:** 46, 45, 29, 39
+
+### Design a code assistant: repo indexing, context assembly, edit application, evaluation. (Cursor)
+
+**Strong answer.** Indexing has to be code-aware: I parse with tree-sitter into symbols, functions, classes, and imports, index at the symbol level with the file path and signature as metadata, build a dependency graph, and keep a BM25 index because identifiers are exact-match, plus embeddings for natural-language intent. It updates on every save through a file watcher, hashing to skip unchanged files, because a code index that lags the editor is worse than none. Context assembly is a budget problem: the open file and cursor region, the symbols referenced from it via the graph, retrieved snippets for the query, and recent edits, ranked and trimmed to a token budget with the most relevant nearest the question. Edit application is the part people underestimate: the model emits a diff or a search-and-replace against exact text, the tool applies it and fails loudly on a mismatch rather than fuzzily guessing, the result compiles or lints before it is shown, and every edit is reversible through the editor's undo or a git checkpoint. Agentic mode runs in a sandbox with the test suite as the verifier and a step budget. Evaluation is hidden-test tasks in real repositories scored by tests passing, plus online signals: acceptance rate of suggestions and edits retained after five minutes. The tradeoff throughout is latency versus context quality, because a code assistant that takes four seconds gets turned off.
+
+**Weak answer sounds like:** "Embed the repo, retrieve relevant files, and have the model write the code."
+
+**Study:** 46, G, 34, 33
+
+### Design a customer-support agent that can take real actions, with escalation to humans. (Sierra, consumer-scale ML companies)
+
+**Strong answer.** The architecture is a graph, not a free-running agent. An intake step classifies intent and risk; a retrieval step pulls the customer record from the CRM and relevant policy from the knowledge base with permission filters; the agent loop has a small namespaced tool set, `crm_lookup`, `stripe_refund`, `ticket_create`, `slack_escalate`, each doing one thing with typed arguments. Actions are tiered by a policy layer the model cannot override: reads are free, reversible writes are logged, and consequential writes like refunds above a threshold or account changes pause for human approval through a durable interrupt with the exact arguments shown. Escalation is a first-class outcome, not a failure: triggers are low confidence, a policy tier, user frustration signals, or the step budget, and the handoff includes a structured summary of what was tried so the human does not start over. Guardrails run on both input, injection and PII, and output, tone and unsupported claims. Every run is traced with tool calls and approvals for audit, and the eval is trajectories in a sandboxed replica of the tools: resolution rate without escalation, wrong-action rate, and pass^k on the top intents. The tradeoff I would name is autonomy versus containment: the more the agent can do, the more the approval layer and the eval have to carry.
+
+**Weak answer sounds like:** "A chatbot with access to the CRM and Stripe APIs that hands off to a human when it can't help."
+
+**Study:** 46, 28, 13, 18
+
+### Design semantic search over a large product catalogue. (Character.AI)
+
+**Strong answer.** Product search is hybrid by nature: users type SKUs, brand names, and exact model numbers, which are BM25 territory, and they type "warm jacket for rainy commutes," which is embedding territory, so I build both and fuse with RRF. Each product is embedded from a constructed text: title, category path, key attributes, and a model-written description, with images embedded through a multimodal model as a second vector. Structured attributes, price, size, availability, are filters, not embedding content, and filtered ANN is the tricky part: a selective filter fragments an HNSW graph, so I either use an index with filter-aware traversal or pre-partition by top-level category. Query understanding runs first: spell correction, attribute extraction, and a small classifier for navigational versus exploratory intent, which decides how much weight to give sparse versus dense. A learned reranker on the top few hundred uses behavioral features, clicks and purchases, which is where most of the business value lives. Freshness is inventory: availability changes constantly, so it is a live filter joined at query time, not baked into the index. Evaluation is offline nDCG against judged queries plus online A/B on conversion, with an eye on the tail queries where semantic search actually earns its cost.
+
+**Weak answer sounds like:** "Embed the product descriptions and do nearest-neighbor search on the query."
+
+**Study:** 45, 25, 29
+
+### Design a content-moderation system combining classifiers and LLMs. (Meta)
+
+**Strong answer.** The design is a funnel that spends compute proportional to risk. Everything passes through cheap, fast classifiers first: hash matching for known bad content, small fine-tuned text and image classifiers with calibrated scores, run at full volume in tens of milliseconds. Confident decisions at either end of the score distribution are final: clear allow and clear block. The ambiguous middle band, a small percentage of volume, goes to an LLM with the policy text in context, which produces a structured decision with a policy citation and a confidence; its value is nuance, sarcasm, context, and new patterns the classifiers have not been trained on. The hardest cases and a random sample of everything go to human reviewers, whose labels flow back to retrain the classifiers and to calibrate the LLM, so the funnel gets cheaper over time. Design constraints: latency budgets differ by surface, pre-publish versus post-publish; false positives have a cost in user trust and appeals, so every block has an appeal path and the metrics are precision and recall per policy category, not one accuracy number; and the adversary adapts, so I monitor for distribution shift in what reaches the middle band. The LLM is also a target for injection embedded in the content, so its output is a structured decision, never an action, and it never sees other users' data.
+
+**Weak answer sounds like:** "Send every post to an LLM and ask if it violates the policy."
+
+**Study:** 18, 02, 19
+
+### Design a document-intelligence pipeline: scanned PDFs in, structured fields out, at 10M documents. (Palantir)
+
+**Strong answer.** This is a batch data pipeline with models inside it, so I design for idempotency and partial failure first. Each document gets a content hash as its id, and every stage writes its output keyed by that hash so re-runs are safe and skip completed work. Stages: OCR or a layout model to get text with bounding boxes and block types; document classification to route to the right schema, invoice, contract, form; field extraction with structured output enforced against that schema, so the output is always valid JSON with the right types; and validation, both hard rules, totals sum, dates parse, and a confidence score per field from the model plus agreement with a second cheaper extractor. Fields below a confidence threshold go to a human review queue with the source region highlighted, and every corrected field becomes training and eval data. At ten million documents the economics dominate: I use a small fine-tuned model for the common document types and reserve the big model for the long tail and for the review-queue cases, and I batch aggressively because there is no interactive latency requirement. Metrics are per-field precision and recall on a held-out labelled set, review-queue rate, and cost per document; the failure mode I design against is a confidently wrong field with no confidence signal, which is why the schema guarantees syntax and the validation layer is what guarantees semantics.
+
+**Weak answer sounds like:** "OCR the PDFs and prompt the model to return JSON."
+
+**Study:** 24, 44, 26, 12
+
+### Design a Text-to-SQL system over a warehouse with thousands of tables. (Databricks, Palantir)
+
+**Strong answer.** With thousands of tables the problem is schema retrieval, not SQL generation. I index the schema: table and column names, types, descriptions, sample values, foreign keys, and, most valuable, real query logs and certified metrics definitions. For a question I retrieve the handful of relevant tables and their join paths, hybrid because column names are exact tokens and descriptions are semantic, and I assemble a compact schema context with example rows. Generation produces SQL through a tool call, and my software, not the model, enforces the sandbox: read-only role, row limits, query timeout, cost estimate before execution, and a denylist of tables the user's principals cannot see. Then I execute and loop: a syntax or runtime error goes back as an actionable tool result for one or two repair attempts with a hard budget. The answer shows the SQL and the result together, because a plausible query with wrong semantics is the main failure mode and only a human who can read the query catches it. Evaluation is execution-accuracy on a curated set of question-and-gold-result pairs, not string match on the SQL, sliced by difficulty and by join count. The tradeoff to call out is ambiguity: "revenue" means five things in a real warehouse, so clarifying questions and certified metric definitions are worth more than a better model.
+
+**Weak answer sounds like:** "Put the schema in the prompt and ask the model to write SQL."
+
+**Study:** 40, 05, 29, 33
+
+### Design a meeting assistant: recording, diarisation, summary, action items, integrations. (Microsoft)
+
+**Strong answer.** The pipeline starts with capture: audio from the meeting platform or a bot participant, consent recorded and visible, streamed to a speech-to-text service that produces timestamped transcripts; diarization assigns speaker labels, ideally seeded with the participant list from the calendar so labels are names rather than "speaker 2." I split processing into a live path and a post-meeting path: live gives a rolling transcript and lightweight notes with low latency; post-meeting runs the expensive steps over the full transcript. Summarization is map-reduce over transcript segments with a final synthesis, because a two-hour meeting does not fit or summarize well in one pass, and every summary point carries timestamps back to the transcript so it is verifiable. Action items are structured extraction: owner, task, due date, with the owner resolved against the participant list and a confidence score, and low-confidence items are shown as suggestions, not facts. Integrations are tools with human confirmation: create the tasks, post the summary to Slack, draft the follow-up email, each one reviewed before it fires, because a hallucinated action item assigned to the VP is a memorable failure. Privacy is a first-class constraint: retention policies, per-tenant isolation, redaction of sensitive content, and the ability to delete. Evaluation is word error rate and diarization error for the audio layer, and human-rated summary faithfulness and action-item precision and recall on labelled meetings.
+
+**Weak answer sounds like:** "Transcribe the audio and ask the model to summarize and list action items."
+
+**Study:** 23, 27, 26
+
+### Design an LLM gateway: routing across providers, failover, caching, budgets and rate limits. (Perplexity, Palantir)
+
+**Strong answer.** The gateway is a proxy that speaks one API to callers and many to providers, and its value is in the policies. Rate limiting is per-tenant token buckets on requests and tokens per minute, enforced before the provider sees anything, with a queue and backpressure rather than a 429 storm. Routing is by a model alias that maps to a provider and model version, so callers say "support-agent-model" and I decide what that means; health-based routing shifts traffic when a provider's error rate or time to first token degrades, and a fallback chain handles outages, with the caveat that tool-call schemas and structured-output behavior differ across providers, so fallbacks must be tested per feature, not assumed. Retries are only on transient errors with backoff and jitter, and never on requests that already streamed partial output to the caller. Caching has two layers: exact-match response cache for deterministic requests, and provider prompt caching, which the gateway helps by keeping system prompts and tool lists byte-stable so prefixes hit; semantic caching I treat as risky and off by default. Budgets are per-tenant and per-feature dollar limits with alerts and hard cuts, which requires token accounting per request including cached-input pricing. Streaming passes through as SSE with time-to-first-token measured at the gateway, and the gateway is where PII redaction, guardrails, and the trace id are attached. The failure mode is the gateway becoming the single point of failure, so it is stateless and horizontally scaled with the rate-limit state in a shared store.
+
+**Weak answer sounds like:** "A proxy that load-balances across OpenAI and Anthropic and retries on errors."
+
+**Study:** 46, 38, 16, 12
+
+### Design the serving stack for a consumer chat assistant at hundreds of millions of users. (Anthropic, OpenAI, Google DeepMind, Meta, xAI)
+
+**Strong answer.** I start from the physics: decode is memory-bandwidth-bound, prefill is compute-bound, and the KV cache is the resource that bounds batch size, so the whole stack is arranged around keeping GPUs busy with large batches while meeting per-user latency SLOs. The serving engine does continuous batching, sequences join and leave every iteration, with PagedAttention so KV memory is allocated in blocks and fragmentation stays near zero instead of the 60 to 80 percent waste of static allocation. Prefix caching keeps the shared system prompt's KV resident so every request skips that prefill, which is why long system prompts are cheap when they are stable. I disaggregate prefill and decode onto separate GPU pools so a long prompt does not stall other users' token streams, at the cost of transferring KV between pools. Quantization is chosen per goal: FP8 weights and KV for throughput on Hopper-class hardware, with task evals rerun to confirm quality. Speculative decoding helps at low batch and stops helping when the batch saturates compute, so it is a knob, not a default. Above the engines sits the gateway layer: global load balancing to the region with capacity, per-user rate limits, admission control that sheds load gracefully, and model tiers so free traffic can route to a smaller model. The metrics are time to first token, time per output token, and goodput, the fraction of requests meeting both SLOs, because raw throughput can rise while goodput falls. Then the boring parts that actually determine reliability: canary rollouts of model versions, capacity planning from the KV formula, and observability on every layer.
+
+**Weak answer sounds like:** "Put the model behind a load balancer with autoscaling and add a cache."
+
+**Study:** 38, 43, 27
+
+## Drawing a practice set
+
+The second cell draws a mixed set with a fixed seed so you can return to the same set tomorrow and check whether your answers improved. Change the seed to get a new set; keep it to compare yourself against yesterday.
+
+```{code-cell} python
+import random
+from collections import Counter
+
+
+def practice_set(bank, size=6, seed=2026, area=None):
+    """Draw a reproducible set, spread across areas unless one area is requested."""
+    rng = random.Random(seed)
+    pool = [q for q in bank if area is None or q.area == area]
+    if area is not None:
+        return rng.sample(pool, k=min(size, len(pool)))
+    # Round-robin over areas so a small set never comes from one area only.
+    by_area = {a: [q for q in pool if q.area == a] for a in AREAS}
+    for qs in by_area.values():
+        rng.shuffle(qs)
+    order = list(AREAS)
+    rng.shuffle(order)
+    drawn = []
+    while len(drawn) < size:
+        for a in order:
+            if by_area[a] and len(drawn) < size:
+                drawn.append(by_area[a].pop())
+    return drawn
+
+
+todays = practice_set(BANK, size=6, seed=2026)
+again = practice_set(BANK, size=6, seed=2026)
+assert [q.text for q in todays] == [q.text for q in again], "fixed seed must reproduce the set"
+assert len({q.text for q in todays}) == 6
+assert len(Counter(q.area for q in todays)) >= 5, "a six-question set should span every area"
+
+for i, q in enumerate(todays, 1):
+    tags = f" ({', '.join(q.companies)})" if q.companies else ""
+    print(f"{i}. [{q.area}] {q.text}{tags}\n   study: {', '.join(q.study)}")
+
+internals_only = practice_set(BANK, size=4, seed=7, area=AREAS[3])
+assert all(q.area == AREAS[3] for q in internals_only)
+print(f"\nInternals drill: {[q.text[:40] + '...' for q in internals_only]}")
+```
+
+The third cell inverts the bank: for each lesson, which questions does it prepare you for? Use it to decide what to reread. A lesson with many pointers is one where a single rebuild pays off across several questions.
+
+```{code-cell} python
+from collections import defaultdict
+
+coverage = defaultdict(list)
+for q in BANK:
+    for lesson in q.study:
+        coverage[lesson].append(q.text)
+
+ranked = sorted(coverage.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+for lesson, questions in ranked[:8]:
+    print(f"lesson {lesson}: {len(questions)} questions")
+
+# Every area's questions should be reachable from at least three distinct lessons,
+# and the two heaviest lessons should be the RAG deep dive and the attention/KV-cache lesson.
+lessons_per_area = {a: {l for q in BANK if q.area == a for l in q.study} for a in AREAS}
+assert all(len(ls) >= 3 for ls in lessons_per_area.values()), lessons_per_area
+assert {ranked[0][0], ranked[1][0]} == {"29", "43"}, [r[0] for r in ranked[:2]]
+assert sum(len(v) for v in coverage.values()) == sum(len(q.study) for q in BANK)
+print(f"\n{len(coverage)} distinct lessons referenced by the bank")
+```
+
+## Key takeaways
+
+- Every strong answer names the mechanism, the tradeoff, the failure mode, and what you would measure; every weak answer names only the concept.
+- Say the number: KV cache bytes per token, RRF's k, tokens per parameter, recall@k before and after reranking.
+- Say who decides: the model chooses, your software executes, enforces policy, and keeps the audit trail.
+- Retrieval and generation are evaluated separately; agents are evaluated as trajectories with outcome verifiers, and reasoning text is not an audit log.
+- Company tags are publicly reported signals compiled by the interview repository, not a promise of what any interviewer will ask.
+- Practice aloud with a fixed seed, mark yourself against the weak-answer line, and rebuild the mechanism in the Study lesson rather than rereading the answer.
