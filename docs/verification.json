@@ -1,0 +1,291 @@
+{
+  "mode": "offline; live and remote cells skipped",
+  "python": "3.14.5 (main, Jun  2 2026, 22:28:56) [Clang 22.1.3 ]",
+  "results": [
+    {
+      "notebook": "notebooks/01_core_patterns/01_prompt_chaining.ipynb",
+      "status": "passed",
+      "seconds": 1.32
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/02_routing.ipynb",
+      "status": "passed",
+      "seconds": 1.23
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/03_parallelization.ipynb",
+      "status": "passed",
+      "seconds": 1.34
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/04_reflection.ipynb",
+      "status": "passed",
+      "seconds": 1.32
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/06_planning.ipynb",
+      "status": "passed",
+      "seconds": 1.33
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/17_reasoning_techniques.ipynb",
+      "status": "passed",
+      "seconds": 1.32
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/20_prioritization.ipynb",
+      "status": "passed",
+      "seconds": 1.33
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/21_exploration_and_discovery.ipynb",
+      "status": "passed",
+      "seconds": 1.24
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/26_mapreduce_summarization_confidence.ipynb",
+      "status": "passed",
+      "seconds": 1.25
+    },
+    {
+      "notebook": "notebooks/01_core_patterns/34_context_engineering.ipynb",
+      "status": "passed",
+      "seconds": 1.22
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/05_tool_use_function_calling.ipynb",
+      "status": "passed",
+      "seconds": 1.26
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/07_multi_agent_collaboration.ipynb",
+      "status": "passed",
+      "seconds": 1.17
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/10_model_context_protocol_mcp.ipynb",
+      "status": "passed",
+      "seconds": 1.16
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/15_inter_agent_communication_a2a.ipynb",
+      "status": "passed",
+      "seconds": 1.17
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/35_computer_use_browser_agents.ipynb",
+      "status": "passed",
+      "seconds": 1.16
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/40_tool_design_and_tool_retrieval.ipynb",
+      "status": "passed",
+      "seconds": 1.31
+    },
+    {
+      "notebook": "notebooks/02_tools_and_protocols/41_skills_and_progressive_disclosure.ipynb",
+      "status": "passed",
+      "seconds": 1.16
+    },
+    {
+      "notebook": "notebooks/03_memory_rag_knowledge/08_memory_management.ipynb",
+      "status": "passed",
+      "seconds": 1.34
+    },
+    {
+      "notebook": "notebooks/03_memory_rag_knowledge/14_knowledge_retrieval_rag.ipynb",
+      "status": "passed",
+      "seconds": 1.37
+    },
+    {
+      "notebook": "notebooks/03_memory_rag_knowledge/25_embeddings_clustering_themes.ipynb",
+      "status": "passed",
+      "seconds": 1.19
+    },
+    {
+      "notebook": "notebooks/03_memory_rag_knowledge/29_advanced_production_rag.ipynb",
+      "status": "passed",
+      "seconds": 1.36
+    },
+    {
+      "notebook": "notebooks/03_memory_rag_knowledge/45_retrieval_internals_bm25_hnsw_rerankers.ipynb",
+      "status": "passed",
+      "seconds": 2.78
+    },
+    {
+      "notebook": "notebooks/04_evals_and_reliability/09_learning_and_adaptation.ipynb",
+      "status": "passed",
+      "seconds": 1.24
+    },
+    {
+      "notebook": "notebooks/04_evals_and_reliability/19_evaluation_and_monitoring.ipynb",
+      "status": "passed",
+      "seconds": 1.15
+    },
+    {
+      "notebook": "notebooks/04_evals_and_reliability/22_evaluation_reliability_deep_dive.ipynb",
+      "status": "passed",
+      "seconds": 0.74
+    },
+    {
+      "notebook": "notebooks/04_evals_and_reliability/32_observability_and_tracing.ipynb",
+      "status": "passed",
+      "seconds": 1.18
+    },
+    {
+      "notebook": "notebooks/04_evals_and_reliability/37_trajectory_evals_and_statistics.ipynb",
+      "status": "passed",
+      "seconds": 1.66
+    },
+    {
+      "notebook": "notebooks/05_safety_and_oversight/13_human_in_the_loop.ipynb",
+      "status": "passed",
+      "seconds": 1.2
+    },
+    {
+      "notebook": "notebooks/05_safety_and_oversight/18_guardrails_safety_patterns.ipynb",
+      "status": "passed",
+      "seconds": 1.24
+    },
+    {
+      "notebook": "notebooks/05_safety_and_oversight/31_agent_security_prompt_injection.ipynb",
+      "status": "passed",
+      "seconds": 1.33
+    },
+    {
+      "notebook": "notebooks/05_safety_and_oversight/33_sandboxed_agent_execution.ipynb",
+      "status": "passed",
+      "seconds": 2.42
+    },
+    {
+      "notebook": "notebooks/05_safety_and_oversight/39_agent_identity_and_governance.ipynb",
+      "status": "passed",
+      "seconds": 1.25
+    },
+    {
+      "notebook": "notebooks/06_production/11_goal_setting_and_monitoring.ipynb",
+      "status": "passed",
+      "seconds": 1.33
+    },
+    {
+      "notebook": "notebooks/06_production/12_exception_handling_and_recovery.ipynb",
+      "status": "passed",
+      "seconds": 3.12
+    },
+    {
+      "notebook": "notebooks/06_production/16_resource_aware_optimization.ipynb",
+      "status": "passed",
+      "seconds": 1.31
+    },
+    {
+      "notebook": "notebooks/06_production/24_structured_output_model_agnostic.ipynb",
+      "status": "passed",
+      "seconds": 1.17
+    },
+    {
+      "notebook": "notebooks/06_production/28_production_agent_harness.ipynb",
+      "status": "passed",
+      "seconds": 1.23
+    },
+    {
+      "notebook": "notebooks/06_production/30_finetuning_routing_prompt_optimization.ipynb",
+      "status": "passed",
+      "seconds": 1.37
+    },
+    {
+      "notebook": "notebooks/06_production/36_durable_agent_orchestration.ipynb",
+      "status": "passed",
+      "seconds": 1.43
+    },
+    {
+      "notebook": "notebooks/06_production/38_llm_serving_infrastructure.ipynb",
+      "status": "passed",
+      "seconds": 0.79
+    },
+    {
+      "notebook": "notebooks/06_production/48_decision_models_jev.ipynb",
+      "status": "passed",
+      "seconds": 1.27
+    },
+    {
+      "notebook": "notebooks/07_voice/23_voice_ai_fundamentals.ipynb",
+      "status": "passed",
+      "seconds": 1.12
+    },
+    {
+      "notebook": "notebooks/07_voice/27_systems_design_voice_platform.ipynb",
+      "status": "passed",
+      "seconds": 1.13
+    },
+    {
+      "notebook": "notebooks/08_appendices/00_course_orientation.ipynb",
+      "status": "passed",
+      "seconds": 1.2
+    },
+    {
+      "notebook": "notebooks/08_appendices/A_appendix_a_advanced_prompting.ipynb",
+      "status": "passed",
+      "seconds": 1.26
+    },
+    {
+      "notebook": "notebooks/08_appendices/B_appendix_b_agentic_interactions.ipynb",
+      "status": "passed",
+      "seconds": 1.14
+    },
+    {
+      "notebook": "notebooks/08_appendices/C_appendix_c_quick_reference.ipynb",
+      "status": "passed",
+      "seconds": 1.13
+    },
+    {
+      "notebook": "notebooks/08_appendices/D_appendix_d_building_an_agent.ipynb",
+      "status": "passed",
+      "seconds": 1.28
+    },
+    {
+      "notebook": "notebooks/08_appendices/E_appendix_e_ai_agents_on_the_cli.ipynb",
+      "status": "passed",
+      "seconds": 1.2
+    },
+    {
+      "notebook": "notebooks/08_appendices/F_appendix_f_under_the_hood.ipynb",
+      "status": "passed",
+      "seconds": 1.2
+    },
+    {
+      "notebook": "notebooks/08_appendices/G_appendix_g_coding_agents.ipynb",
+      "status": "passed",
+      "seconds": 1.13
+    },
+    {
+      "notebook": "notebooks/08_appendices/H_appendix_h_forward_deployed_engineering.ipynb",
+      "status": "passed",
+      "seconds": 1.2
+    },
+    {
+      "notebook": "notebooks/09_llm_fundamentals/42_tokens_embeddings_transformer.ipynb",
+      "status": "passed",
+      "seconds": 0.71
+    },
+    {
+      "notebook": "notebooks/09_llm_fundamentals/43_attention_kv_cache_gqa_moe.ipynb",
+      "status": "passed",
+      "seconds": 0.79
+    },
+    {
+      "notebook": "notebooks/09_llm_fundamentals/44_decoding_reasoning_models_structured_output.ipynb",
+      "status": "passed",
+      "seconds": 0.92
+    },
+    {
+      "notebook": "notebooks/10_interviews/46_ai_system_design_interviews.ipynb",
+      "status": "passed",
+      "seconds": 1.23
+    },
+    {
+      "notebook": "notebooks/10_interviews/47_agent_interview_question_bank.ipynb",
+      "status": "passed",
+      "seconds": 0.67
+    }
+  ]
+}
